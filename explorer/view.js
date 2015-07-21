@@ -22,36 +22,6 @@ var app = {
     fullScreen : false
 };
 
-// From Mozilla:
-// https://developer.mozilla.org/en-US/docs/Web/Guide/API/DOM/Using_full_screen_mode
-function toggleFullScreen() {
-    if (!document.fullscreenElement &&    // alternative standard method
-        !document.mozFullScreenElement &&
-        !document.webkitFullscreenElement &&
-        !document.msFullscreenElement ) 
-    {  // current working methods
-        if (document.documentElement.requestFullscreen) {
-            document.documentElement.requestFullscreen();
-        } else if (document.documentElement.msRequestFullscreen) {
-            document.documentElement.msRequestFullscreen();
-        } else if (document.documentElement.mozRequestFullScreen) {
-            document.documentElement.mozRequestFullScreen();
-        } else if (document.documentElement.webkitRequestFullscreen) {
-            document.documentElement.webkitRequestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
-        }
-    } else {
-        if (document.exitFullscreen) {
-            document.exitFullscreen();
-        } else if (document.msExitFullscreen) {
-            document.msExitFullscreen();
-        } else if (document.mozCancelFullScreen) {
-            document.mozCancelFullScreen();
-        } else if (document.webkitExitFullscreen) {
-            document.webkitExitFullscreen();
-        }
-    }
-}
-
 var mesh = {
     objfile: "",
     batches: null,
@@ -1009,11 +979,6 @@ $(function(){
         });
 
     });
-
-    $("#main").bind({"touchmove": function(event) {
-        if (!app.fullScreen)
-            toggleFullScreen();
-    }});
 
     // events
     camera.ty = 0;
