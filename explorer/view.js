@@ -525,10 +525,11 @@ function redraw()
 
     $('#fps').text(Math.round(fps));
 
-    //if (drawTris > 100000)
-    //    drawTris = Math.floor(drawTris/100000)/10+" M";
-    drawTris = Math.floor(drawTris/10000)/100+" M";
-    $('#triangles').text(drawTris.toLocaleString());
+    if (drawTris > 500000)
+        drawTris = (drawTris/1000000.).toFixed(3).toLocaleString() + " M";
+    else
+        drawTris = Math.floor(drawTris/1000).toFixed(0).toLocaleString()+" K";
+    $('#triangles').text(drawTris);
 }
 
 function GetTessLevels(p0, p1, p2, p3, level, transition,
