@@ -9,17 +9,48 @@ var Now = function() { return Date.now(); };
 var toJS;
 var gl;
 var app = {
-    level : 4,
+    level : 6,
     adaptive : true,
-    tessFactor : 5,
-    displayMode : 3,
+    tessFactor : 2,
+    displayMode : 2,
     animation : false,
     hull : false,
     model : 'catmark_tet',
     glExt : null,
     OES_standard_derivatives : false,
-    devicePixelRatio : 1
+    devicePixelRatio : 1,
+    fullScreen : false
 };
+
+// From Mozilla:
+// https://developer.mozilla.org/en-US/docs/Web/Guide/API/DOM/Using_full_screen_mode
+function toggleFullScreen() {
+    if (!document.fullscreenElement &&    // alternative standard method
+        !document.mozFullScreenElement &&
+        !document.webkitFullscreenElement &&
+        !document.msFullscreenElement ) 
+    {  // current working methods
+        if (document.documentElement.requestFullscreen) {
+            document.documentElement.requestFullscreen();
+        } else if (document.documentElement.msRequestFullscreen) {
+            document.documentElement.msRequestFullscreen();
+        } else if (document.documentElement.mozRequestFullScreen) {
+            document.documentElement.mozRequestFullScreen();
+        } else if (document.documentElement.webkitRequestFullscreen) {
+            document.documentElement.webkitRequestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
+        }
+    } else {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        } else if (document.msExitFullscreen) {
+            document.msExitFullscreen();
+        } else if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
+        } else if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+        }
+    }
+}
 
 var mesh = {
     objfile: "",
@@ -960,17 +991,29 @@ $(function(){
     // In each click event, assign the display mode and toggle selected.
     // Disable selected for all other buttons.
     $(".button").each(function(i) {
+        if (app.displayMode === i)
+            $("#" + this.id).addClass("selected")
+        else
+            $("#" + this.id).removeClass("selected")
         $("#" + this.id).click(function(e) {
-            app.displayMode = i;
-            initShaders();
-            redraw();
+            // Update UI first to keep it feeling responsive
             $(".button").each(function(i) {
                 $("#" + this.id).removeClass("selected")
             })
             $("#" + this.id).addClass("selected")
 
+            // Update displayMode
+            app.displayMode = i;
+            initShaders();
+            redraw();
         });
+
     });
+
+    $("#main").bind({"touchmove": function(event) {
+        if (!app.fullScreen)
+            toggleFullScreen();
+    }});
 
     // events
     camera.ty = 0;
