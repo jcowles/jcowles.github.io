@@ -17,7 +17,6 @@ const MIN_VISIBLE_INTENSITY = 0.001
 const MIN_RIPPLE_INTENSITY = 0.06
 const BACKGROUND_COLOR = '#082c4a'
 const SCATTER_DURATION = 3000
-const SCATTER_STEPS =20
 const RIPPLE_STEP_DELAY_MS = 22
 const EXPLOSION_RADIUS = 100
 const EXPLOSION_DURATION_MS = 380
@@ -52,6 +51,12 @@ const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 const AUTO_SCATTER_INTERVAL_MS =
   Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
+const SCATTER_PARTICLE_SPEED_MIN = 6
+const SCATTER_PARTICLE_SPEED_MAX = 18
+const SCATTER_PARTICLE_DRAG = 0.94
+const SCATTER_PARTICLE_INTENSITY_DECAY = 0.92
+const SCATTER_PARTICLE_MIN_INTENSITY = 0.035
+const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -76,6 +81,15 @@ interface ExplosionParticle {
   vy: number
   intensity: number
   color: [number, number, number]
+}
+
+interface ScatterParticle {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  intensity: number
+  lastCellIndex: number
 }
 
 const downsampleCanvasCoverage = (
@@ -611,6 +625,13 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const scatterActiveRef = useRef<boolean>(false)
   const pendingForcedScatterRef = useRef<boolean>(false)
   const completeScatterRef = useRef<() => void>(() => {})
+  const scatterParticlesRef = useRef<ScatterParticle[]>([])
+  const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
+  const particleSpawnInitRef = useRef(false)
+  if (!particleSpawnInitRef.current) {
+    lastParticleSpawnRef.current.fill(-Infinity)
+    particleSpawnInitRef.current = true
+  }
 
 
   const clearScatterTimers = useCallback(() => {
@@ -627,6 +648,17 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const clearRippleTimers = useCallback(() => {
     rippleTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     rippleTimersRef.current = []
+  }, [])
+
+  const depositIntensity = useCallback((cellIndex: number, value: number) => {
+    const intensities = intensitiesRef.current
+    if (cellIndex < 0 || cellIndex >= intensities.length || value <= 0) {
+      return
+    }
+    const clamped = Math.min(1, value)
+    if (intensities[cellIndex] < clamped) {
+      intensities[cellIndex] = clamped
+    }
   }, [])
 
   const clearScatterCompletionGuard = useCallback(() => {
@@ -800,6 +832,55 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     return true
   }, [])
 
+  const updateScatterParticles = useCallback(
+    (delta = 1) => {
+      const particles = scatterParticlesRef.current
+      if (particles.length === 0) {
+        return false
+      }
+
+      const dragStep = Math.pow(SCATTER_PARTICLE_DRAG, delta)
+      const decayStep = Math.pow(SCATTER_PARTICLE_INTENSITY_DECAY, delta)
+      const nextParticles: ScatterParticle[] = []
+      let hasEnergy = false
+
+      for (let index = 0; index < particles.length; index += 1) {
+        const particle = particles[index]
+        particle.vx *= dragStep
+        particle.vy *= dragStep
+        particle.x += particle.vx * delta
+        particle.y += particle.vy * delta
+        particle.intensity *= decayStep
+
+        if (particle.intensity <= SCATTER_PARTICLE_MIN_INTENSITY) {
+          continue
+        }
+
+        const cellX = Math.floor(particle.x)
+        const cellY = Math.floor(particle.y)
+        if (cellX < 0 || cellX >= GRID_SIZE || cellY < 0 || cellY >= GRID_SIZE) {
+          continue
+        }
+
+        const cellIndex = cellY * GRID_SIZE + cellX
+        const headIntensity = clamp(particle.intensity, 0, 1)
+        depositIntensity(cellIndex, headIntensity)
+
+        if (particle.lastCellIndex !== cellIndex) {
+          depositIntensity(particle.lastCellIndex, clamp(particle.intensity * 0.9, 0, 1))
+          particle.lastCellIndex = cellIndex
+        }
+
+        nextParticles.push(particle)
+        hasEnergy = true
+      }
+
+      scatterParticlesRef.current = nextParticles
+      return hasEnergy
+    },
+    [depositIntensity],
+  )
+
   const decayIntensities = useCallback(
     ({ suppressIntroGlow = false, delta = 1 }: { suppressIntroGlow?: boolean; delta?: number } = {}) => {
       const intensities = intensitiesRef.current
@@ -865,12 +946,15 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       }
 
       const explosionHasEnergy = updateGlobalExplosion(frameDelta)
-      const hasEnergy =
-        explosionHasEnergy ||
-        decayIntensities({ suppressIntroGlow: explosionHasEnergy, delta: frameDelta })
+      const intensityHasEnergy = decayIntensities({
+        suppressIntroGlow: explosionHasEnergy,
+        delta: frameDelta,
+      })
+      const particlesHaveEnergy = updateScatterParticles(frameDelta)
       draw()
 
       const needsReveal = textRevealProgressRef.current < 1
+      const hasEnergy = explosionHasEnergy || intensityHasEnergy || particlesHaveEnergy
 
       if (
         phaseRef.current !== 'grid' ||
@@ -884,7 +968,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         lastFrameTimeRef.current = null
       }
     },
-    [decayIntensities, draw, updateGlobalExplosion],
+    [decayIntensities, draw, updateGlobalExplosion, updateScatterParticles],
   )
 
   const scheduleFrame = useCallback(
@@ -899,6 +983,53 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       animationFrameRef.current = window.requestAnimationFrame(frame)
     },
     [frame],
+  )
+
+  const spawnScatterParticle = useCallback(
+    (cellIndex: number, baseIntensity = 1) => {
+      if (!Number.isFinite(cellIndex) || cellIndex < 0 || cellIndex >= GRID_SIZE * GRID_SIZE) {
+        return
+      }
+
+      const cellX = cellIndex % GRID_SIZE
+      const cellY = Math.floor(cellIndex / GRID_SIZE)
+      const intensity = clamp(baseIntensity, 0, 1)
+      const angle = Math.random() * Math.PI * 2
+      const speed =
+        SCATTER_PARTICLE_SPEED_MIN +
+        Math.random() * (SCATTER_PARTICLE_SPEED_MAX - SCATTER_PARTICLE_SPEED_MIN)
+      const particle: ScatterParticle = {
+        x: cellX + 0.5,
+        y: cellY + 0.5,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        intensity,
+        lastCellIndex: cellIndex,
+      }
+
+      scatterParticlesRef.current.push(particle)
+      depositIntensity(cellIndex, intensity)
+      scheduleFrame()
+    },
+    [depositIntensity, scheduleFrame],
+  )
+
+  const trySpawnParticleForHighlight = useCallback(
+    (cellIndex: number, intensity: number) => {
+      if (cellIndex < 0 || cellIndex >= GRID_SIZE * GRID_SIZE || intensity <= 0) {
+        return
+      }
+
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      const lastSpawn = lastParticleSpawnRef.current[cellIndex]
+      if (Number.isFinite(lastSpawn) && now - lastSpawn < SCATTER_PARTICLE_SPAWN_COOLDOWN_MS) {
+        return
+      }
+
+      lastParticleSpawnRef.current[cellIndex] = now
+      spawnScatterParticle(cellIndex, intensity)
+    },
+    [spawnScatterParticle],
   )
 
   const getCellFromEvent = useCallback((event: PointerEvent<HTMLCanvasElement>) => {
@@ -1016,10 +1147,17 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
       const index = cellY * GRID_SIZE + cellX
       const intensities = intensitiesRef.current
-      intensities[index] = Math.max(intensities[index], Math.min(Math.max(intensity, 0), 1))
+      const clamped = Math.min(Math.max(intensity, 0), 1)
+      const next = Math.max(intensities[index], clamped)
+      intensities[index] = next
+
+      if (clamped >= 0.9) {
+        trySpawnParticleForHighlight(index, clamped)
+      }
+
       scheduleFrame()
     },
-    [scheduleFrame],
+    [scheduleFrame, trySpawnParticleForHighlight],
   )
 
   const applyRipple = useCallback(
@@ -1062,62 +1200,53 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   )
 
   const scatterCell = useCallback(
-    (cellIndex: number) => {
+    (cellIndex: number, { intensity = 1, allowDuplicate = false }: { intensity?: number; allowDuplicate?: boolean } = {}) => {
+      if (cellIndex < 0 || cellIndex >= GRID_SIZE * GRID_SIZE) {
+        return
+      }
+
       const textIndex = textData.cellIndexLookup[cellIndex]
-      if (textIndex === -1) {
-        return
-      }
+      let shouldSpawn = true
 
-      const flags = textScatterFlagsRef.current
-      if (flags[textIndex] === 1) {
-        return
-      }
-
-      flags[textIndex] = 1
-      remainingTextCellsRef.current -= 1
-      ensureScatterCompletionGuard()
-
-      if (!scatterStartedRef.current) {
-        scatterStartedRef.current = true
-        onScatterStart()
-      }
-
-      const cellX = cellIndex % GRID_SIZE
-      const cellY = Math.floor(cellIndex / GRID_SIZE)
-      const angle = Math.random() * Math.PI * 2
-      const magnitude = 12 + Math.random() * 8
-      const vx = Math.cos(angle) * magnitude
-      const vy = Math.sin(angle) * magnitude
-
-      for (let stepIndex = 1; stepIndex <= SCATTER_STEPS; stepIndex += 1) {
-        const progress = stepIndex / SCATTER_STEPS
-        const targetX = Math.round(cellX + vx * progress)
-        const targetY = Math.round(cellY + vy * progress)
-        const delay = progress * SCATTER_DURATION * 0.9
-        const intensity = Math.max(0.1, 1 - progress * 0.85)
-
-        const timer = window.setTimeout(() => {
-          igniteCell(targetX, targetY, intensity)
-        }, delay)
-        scatterTimersRef.current.push(timer)
-      }
-
-      const completionTimer = window.setTimeout(() => {
-        if (!scatterCompleteRef.current && remainingTextCellsRef.current <= 0) {
-          clearScatterCompletionGuard()
-          scatterCompleteRef.current = true
-          onScatterComplete()
-          completeScatterRef.current()
+      if (textIndex !== -1) {
+        const flags = textScatterFlagsRef.current
+        if (!allowDuplicate && flags[textIndex] === 1) {
+          shouldSpawn = false
         }
-      }, SCATTER_DURATION + 180)
-      scatterTimersRef.current.push(completionTimer)
+
+        if (shouldSpawn && flags[textIndex] === 0) {
+          flags[textIndex] = 1
+          remainingTextCellsRef.current -= 1
+          ensureScatterCompletionGuard()
+
+          if (!scatterStartedRef.current) {
+            scatterStartedRef.current = true
+            onScatterStart()
+          }
+        }
+      } else if (!allowDuplicate) {
+        shouldSpawn = true
+      }
+
+      if (!shouldSpawn) {
+        return
+      }
+
+      spawnScatterParticle(cellIndex, intensity)
+
+      if (textIndex !== -1 && !scatterCompleteRef.current && remainingTextCellsRef.current <= 0) {
+        clearScatterCompletionGuard()
+        scatterCompleteRef.current = true
+        onScatterComplete()
+        completeScatterRef.current()
+      }
     },
     [
       clearScatterCompletionGuard,
       ensureScatterCompletionGuard,
-      igniteCell,
       onScatterComplete,
       onScatterStart,
+      spawnScatterParticle,
       textData.cellIndexLookup,
     ],
   )
@@ -1134,10 +1263,9 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       }
 
       igniteCell(coords.cellX, coords.cellY, 1)
-      scatterCell(coords.cellIndex)
       applyRipple(coords.cellX, coords.cellY)
     },
-    [applyRipple, getCellFromEvent, igniteCell, scatterCell],
+    [applyRipple, getCellFromEvent, igniteCell],
   )
 
   const triggerExplosion = useCallback(
@@ -1173,7 +1301,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
           const timer = window.setTimeout(() => {
             igniteCell(targetX, targetY, intensity)
-            scatterCell(targetY * GRID_SIZE + targetX)
+            scatterCell(targetY * GRID_SIZE + targetX, {
+              intensity,
+              allowDuplicate: true,
+            })
           }, delay)
 
           explosionTimersRef.current.push(timer)
@@ -1209,6 +1340,9 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       remainingTextCellsRef.current = textData.cellIndices.length
       scatterStartedRef.current = false
       scatterCompleteRef.current = false
+      scatterParticlesRef.current = []
+      lastParticleSpawnRef.current.fill(-Infinity)
+      intensitiesRef.current.fill(0)
 
       clearScatterCompletionGuard()
       clearScatterTimers()
@@ -1347,6 +1481,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       clearScatterCompletionGuard()
       globalExplosionActiveRef.current = false
       globalExplosionParticlesRef.current = []
+      scatterParticlesRef.current = []
+      lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       lastFrameTimeRef.current = null
       if (interactiveEnableTimerRef.current !== null) {
@@ -1375,6 +1511,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       remainingTextCellsRef.current = textData.cellIndices.length
       scatterStartedRef.current = false
       scatterCompleteRef.current = false
+      scatterParticlesRef.current = []
+      lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       clearScatterTimers()
       clearExplosionTimers()
