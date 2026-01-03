@@ -46,21 +46,23 @@ const GLOBAL_EXPLOSION_GRAVITY = 0.22
 const GLOBAL_EXPLOSION_DRAG = 0.96
 const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
 const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
-const TEXT_REVEAL_DURATION_MS = 3000
+const TEXT_REVEAL_DURATION_MS = 1000
 const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 const AUTO_SCATTER_INTERVAL_MS =
   Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
-const SCATTER_PARTICLE_SPEED_MIN = .1
-const SCATTER_PARTICLE_SPEED_MAX = 1
-const SCATTER_PARTICLE_DRAG = 0.99
-const SCATTER_PARTICLE_INTENSITY_DECAY = 0.9
-const SCATTER_PARTICLE_MIN_INTENSITY = 0.004
-const SCATTER_PARTICLE_MAX_AGE_MS = 400
-const SCATTER_PARTICLE_MAX_COUNT = 100
+const SCATTER_PARTICLE_SPEED_MIN = 1
+const SCATTER_PARTICLE_SPEED_MAX = 2
+const SCATTER_PARTICLE_DRAG = 0.9
+const SCATTER_PARTICLE_INTENSITY_DECAY = 0.99
+const SCATTER_PARTICLE_MIN_INTENSITY = .25
+const SCATTER_PARTICLE_MAX_AGE_MS = 800
+const SCATTER_PARTICLE_MAX_COUNT = 600
 const SCATTER_PARTICLE_FRAME_MS = 1000 / 60
-const TRAIL_RELEASE_MAX_AGE_MS = 100
+const TRAIL_RELEASE_MAX_AGE_MS = 800
 const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
+
+
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -649,12 +651,20 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const pendingTextScatterRef = useRef<number[]>([])
   const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const intensityAgeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
+  const highlightActiveRef = useRef<number[]>([])
+  const highlightActiveFlagsRef = useRef<Uint8Array>(new Uint8Array(GRID_SIZE * GRID_SIZE))
+  const frameRunningRef = useRef<boolean>(false)
+  const framePendingRef = useRef<boolean>(false)
   const textRevealTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
   const particleSpawnInitRef = useRef(false)
   if (!particleSpawnInitRef.current) {
     lastParticleSpawnRef.current.fill(-Infinity)
+    intensityAgeRef.current.fill(0)
+    highlightActiveFlagsRef.current.fill(0)
+    highlightActiveRef.current.length = 0
     particleSpawnInitRef.current = true
   }
+
 
 
   const clearScatterTimers = useCallback(() => {
@@ -676,6 +686,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const depositIntensity = useCallback((cellIndex: number, value: number) => {
     const intensities = intensitiesRef.current
     const ages = intensityAgeRef.current
+    const highlightFlags = highlightActiveFlagsRef.current
     if (cellIndex < 0 || cellIndex >= intensities.length || value <= 0) {
       return
     }
@@ -684,7 +695,16 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       intensities[cellIndex] = clamped
     }
     ages[cellIndex] = 0
-  }, [])
+
+    if (
+      clamped > MIN_VISIBLE_INTENSITY &&
+      highlightFlags[cellIndex] === 0 &&
+      textData.mask[cellIndex] <= 0
+    ) {
+      highlightFlags[cellIndex] = 1
+      highlightActiveRef.current.push(cellIndex)
+    }
+  }, [highlightActiveFlagsRef, highlightActiveRef, textData.mask])
 
   const clearScatterCompletionGuard = useCallback(() => {
     if (scatterCompletionGuardRef.current !== null) {
@@ -753,45 +773,89 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       return
     }
 
-    for (let y = 0; y < GRID_SIZE; y += 1) {
-      const rowOffset = y * GRID_SIZE
-      for (let x = 0; x < GRID_SIZE; x += 1) {
-        const cellIndex = rowOffset + x
-        const coverage = mask[cellIndex]
-        const intensity = intensities[cellIndex]
-        const revealRatio = revealRatios[cellIndex]
-        const revealWeight = computeSweepReveal(revealProgress, revealRatio)
+    const textCells = textData.cellIndices
+    for (let index = 0; index < textCells.length; index += 1) {
+      const cellIndex = textCells[index]
+      const coverage = mask[cellIndex]
+      const intensity = intensities[cellIndex]
+      const revealRatio = revealRatios[cellIndex]
+      const revealWeight = computeSweepReveal(revealProgress, revealRatio)
 
-        if (coverage <= 0 && intensity <= MIN_VISIBLE_INTENSITY && revealWeight <= 0) {
-          continue
-        }
-
-        const colorOffset = cellIndex * 3
-        const baseR = colors[colorOffset]
-        const baseG = colors[colorOffset + 1]
-        const baseB = colors[colorOffset + 2]
-
-        const normalizedCoverage = coverage > 0 ? Math.max(coverage, revealWeight) : 0
-        const hasTextFill = normalizedCoverage > 0 && revealWeight > 0
-        const baseVisibility = hasTextFill ? phaseVisibility * revealWeight : 0
-        const baseAlpha = hasTextFill ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
-
-        const highlightAlpha = intensity > 0 ? intensity * HIGHLIGHT_ALPHA : 0
-        const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
-        if (finalAlpha <= 0) {
-          continue
-        }
-
-        const highlightStrength = Math.min(1, intensity * HIGHLIGHT_BLEND)
-        const r = Math.round(baseR + (255 - baseR) * highlightStrength)
-        const g = Math.round(baseG + (255 - baseG) * highlightStrength)
-        const b = Math.round(baseB + (255 - baseB) * highlightStrength)
-
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha})`
-        ctx.fillRect(offsetX + x * cellSize, offsetY + y * cellSize, cellSize, cellSize)
+      if (coverage <= 0 && intensity <= MIN_VISIBLE_INTENSITY && revealWeight <= 0) {
+        continue
       }
+
+      const colorOffset = cellIndex * 3
+      const baseR = colors[colorOffset]
+      const baseG = colors[colorOffset + 1]
+      const baseB = colors[colorOffset + 2]
+
+      const normalizedCoverage = coverage > 0 ? Math.max(coverage, revealWeight) : 0
+      const hasTextFill = normalizedCoverage > 0 && revealWeight > 0
+      const baseVisibility = hasTextFill ? phaseVisibility * revealWeight : 0
+      const baseAlpha = hasTextFill ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
+
+      const highlightAlpha = intensity > 0 ? intensity * HIGHLIGHT_ALPHA : 0
+      const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
+      if (finalAlpha <= 0) {
+        continue
+      }
+
+      const highlightStrength = Math.min(1, intensity * HIGHLIGHT_BLEND)
+      const r = Math.round(baseR + (255 - baseR) * highlightStrength)
+      const g = Math.round(baseG + (255 - baseG) * highlightStrength)
+      const b = Math.round(baseB + (255 - baseB) * highlightStrength)
+
+      const cellX = cellIndex % GRID_SIZE
+      const cellY = Math.floor(cellIndex / GRID_SIZE)
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha})`
+      ctx.fillRect(offsetX + cellX * cellSize, offsetY + cellY * cellSize, cellSize, cellSize)
     }
-  }, [globalExplosionActiveRef, globalExplosionParticlesRef, textData])
+
+    const highlightFlags = highlightActiveFlagsRef.current
+    const highlightList = highlightActiveRef.current
+    for (let listIndex = highlightList.length - 1; listIndex >= 0; listIndex -= 1) {
+      const cellIndex = highlightList[listIndex]
+      if (highlightFlags[cellIndex] === 0) {
+        highlightList[listIndex] = highlightList[highlightList.length - 1]
+        highlightList.pop()
+        continue
+      }
+
+      const intensity = intensities[cellIndex]
+      if (intensity <= MIN_VISIBLE_INTENSITY) {
+        highlightFlags[cellIndex] = 0
+        highlightList[listIndex] = highlightList[highlightList.length - 1]
+        highlightList.pop()
+        continue
+      }
+
+      if (mask[cellIndex] > 0) {
+        continue
+      }
+
+      const highlightAlpha = Math.min(1, intensity * HIGHLIGHT_ALPHA)
+      if (highlightAlpha <= 0) {
+        highlightFlags[cellIndex] = 0
+        highlightList[listIndex] = highlightList[highlightList.length - 1]
+        highlightList.pop()
+        continue
+      }
+
+      const colorOffset = cellIndex * 3
+      const baseR = colors[colorOffset]
+      const baseG = colors[colorOffset + 1]
+      const baseB = colors[colorOffset + 2]
+      const highlightStrength = Math.min(1, intensity * HIGHLIGHT_BLEND)
+      const r = Math.round(baseR + (255 - baseR) * highlightStrength)
+      const g = Math.round(baseG + (255 - baseG) * highlightStrength)
+      const b = Math.round(baseB + (255 - baseB) * highlightStrength)
+      const cellX = cellIndex % GRID_SIZE
+      const cellY = Math.floor(cellIndex / GRID_SIZE)
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${highlightAlpha})`
+      ctx.fillRect(offsetX + cellX * cellSize, offsetY + cellY * cellSize, cellSize, cellSize)
+    }
+  }, [globalExplosionActiveRef, globalExplosionParticlesRef, highlightActiveFlagsRef, highlightActiveRef, textData])
 
   const updateGlobalExplosion = useCallback((delta = 1) => {
     if (!globalExplosionActiveRef.current) {
@@ -921,6 +985,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       let hasEnergy = false
 
       const ages = intensityAgeRef.current
+      const highlightFlags = highlightActiveFlagsRef.current
       if (!suppressIntroGlow) {
         const revealTriggered = textRevealTriggeredRef.current
         const pendingTextScatter = pendingTextScatterRef.current
@@ -937,15 +1002,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
             pendingTextScatter.push(cellIndex)
           }
 
-          if (revealWeight <= 0) {
-            intensities[cellIndex] = Math.max(0, intensities[cellIndex] * decayStep)
-            ages[cellIndex] += delta * SCATTER_PARTICLE_FRAME_MS
-            continue
-          }
-          const targetValue = Math.max(intensities[cellIndex], revealWeight)
-          intensities[cellIndex] = targetValue
-          ages[cellIndex] = 0
-          if (targetValue > 0) {
+          if (revealWeight > 0 && revealWeight < 1) {
             hasEnergy = true
           }
         }
@@ -956,6 +1013,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         if (value <= MIN_VISIBLE_INTENSITY) {
           intensities[index] = 0
           ages[index] = 0
+          highlightFlags[index] = 0
           continue
         }
 
@@ -963,6 +1021,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         if (ages[index] >= TRAIL_RELEASE_MAX_AGE_MS) {
           intensities[index] = 0
           ages[index] = 0
+          highlightFlags[index] = 0
           continue
         }
 
@@ -970,6 +1029,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         intensities[index] = next <= MIN_VISIBLE_INTENSITY ? 0 : next
         if (intensities[index] === 0) {
           ages[index] = 0
+          highlightFlags[index] = 0
           continue
         }
         hasEnergy = true
@@ -977,11 +1037,14 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
       return hasEnergy
     },
-    [textData.cellIndices, textData.revealRatios],
+    [highlightActiveFlagsRef, textData.cellIndices, textData.revealRatios],
   )
 
   const frame = useCallback(
     (timestamp: number) => {
+      frameRunningRef.current = true
+      framePendingRef.current = false
+
       const lastTimestamp = lastFrameTimeRef.current
       const deltaMs = lastTimestamp === null ? 16 : timestamp - lastTimestamp
       const frameDelta = Math.min(deltaMs / (1000 / 60), 2)
@@ -1003,10 +1066,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
       const pendingScatter = pendingTextScatterRef.current
       if (pendingScatter.length > 0) {
-        const items = pendingScatter.splice(0, pendingScatter.length)
-        for (let index = 0; index < items.length; index += 1) {
-          scatterCellRef.current(items[index])
+        const batchSize = 96
+        const take = Math.min(batchSize, pendingScatter.length)
+        for (let index = 0; index < take; index += 1) {
+          scatterCellRef.current(pendingScatter[index])
         }
+        pendingScatter.splice(0, take)
       }
 
       const particlesHaveEnergy = updateScatterParticles(frameDelta)
@@ -1015,13 +1080,18 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       const needsReveal = textRevealProgressRef.current < 1
       const hasEnergy = explosionHasEnergy || intensityHasEnergy || particlesHaveEnergy
 
-      if (
+      const shouldContinue =
         phaseRef.current !== 'grid' ||
         hasEnergy ||
         explosionHasEnergy ||
         globalExplosionActiveRef.current ||
-        needsReveal
-      ) {
+        needsReveal ||
+        framePendingRef.current
+
+      frameRunningRef.current = false
+
+      if (shouldContinue) {
+        framePendingRef.current = false
         animationFrameRef.current = window.requestAnimationFrame(frame)
       } else {
         lastFrameTimeRef.current = null
@@ -1032,6 +1102,11 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
   const scheduleFrame = useCallback(
     (force = false) => {
+      if (frameRunningRef.current) {
+        framePendingRef.current = true
+        return
+      }
+
       if (animationFrameRef.current !== null) {
         if (!force) {
           return
@@ -1039,6 +1114,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         window.cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
+
+      framePendingRef.current = false
       animationFrameRef.current = window.requestAnimationFrame(frame)
     },
     [frame],
@@ -1058,7 +1135,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         SCATTER_PARTICLE_SPEED_MIN +
         Math.random() * (SCATTER_PARTICLE_SPEED_MAX - SCATTER_PARTICLE_SPEED_MIN)
       if (scatterParticlesRef.current.length >= SCATTER_PARTICLE_MAX_COUNT) {
-        scatterParticlesRef.current.shift()
+        return
       }
 
       const particle: ScatterParticle = {
@@ -1414,6 +1491,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       scatterParticlesRef.current = []
       pendingTextScatterRef.current.length = 0
       textRevealTriggeredRef.current.fill(0)
+      highlightActiveRef.current.length = 0
+      highlightActiveFlagsRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       intensityAgeRef.current.fill(0)
@@ -1550,6 +1629,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       scatterParticlesRef.current = []
       pendingTextScatterRef.current.length = 0
       textRevealTriggeredRef.current.fill(0)
+      highlightActiveRef.current.length = 0
+      highlightActiveFlagsRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       intensityAgeRef.current.fill(0)
@@ -1583,6 +1664,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       scatterParticlesRef.current = []
       pendingTextScatterRef.current.length = 0
       textRevealTriggeredRef.current.fill(0)
+      highlightActiveRef.current.length = 0
+      highlightActiveFlagsRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       intensityAgeRef.current.fill(0)
