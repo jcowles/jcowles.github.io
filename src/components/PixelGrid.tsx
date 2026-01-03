@@ -47,6 +47,10 @@ const GLOBAL_EXPLOSION_GRAVITY = 0.22
 const GLOBAL_EXPLOSION_DRAG = 0.96
 const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
 const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
+const AUTO_SCATTER_INTERVAL_MS = SCATTER_DURATION + EXPLOSION_DURATION_MS + 600
+const TEXT_REVEAL_DURATION_MS = 600
+const TEXT_REVEAL_SMOOTHING = 0.08
+const HIGHLIGHT_BLEND = 0.5
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -193,6 +197,7 @@ const createMaskPreview = (mask: Float32Array, colors: Float32Array): string => 
 const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array): TextData => {
   const mask = new Float32Array(totalCells)
   const colors = new Float32Array(totalCells * 3)
+  const revealRatios = new Float32Array(totalCells)
   const cellIndices: number[] = []
 
   const minStripe = Math.floor(GRID_SIZE * 0.3)
@@ -210,6 +215,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
         colors[offset + 1] = g
         colors[offset + 2] = b
         mask[cellIndex] = 1
+        revealRatios[cellIndex] = ratio
         cellIndexLookup[cellIndex] = cellIndices.length
         cellIndices.push(cellIndex)
       } else {
@@ -217,6 +223,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
         colors[offset + 1] = DEFAULT_COLOR[1]
         colors[offset + 2] = DEFAULT_COLOR[2]
         mask[cellIndex] = 0
+        revealRatios[cellIndex] = 1
       }
     }
   }
@@ -224,6 +231,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
   return {
     mask,
     colors,
+    revealRatios,
     cellIndices: Int32Array.from(cellIndices),
     cellIndexLookup,
   }
@@ -232,6 +240,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
 interface TextData {
   mask: Float32Array
   colors: Float32Array
+  revealRatios: Float32Array
   cellIndices: Int32Array
   cellIndexLookup: Int32Array
 }
@@ -281,6 +290,8 @@ const createTextData = (): TextData => {
 
   const mask = new Float32Array(totalCells)
   const colors = new Float32Array(totalCells * 3)
+  const revealRatios = new Float32Array(totalCells)
+  revealRatios.fill(1)
   const cellIndices: number[] = []
 
   if (typeof document === 'undefined') {
@@ -387,13 +398,16 @@ const createTextData = (): TextData => {
     }
 
     const offset = cellIndex * 3
+    const ratio = width > 1 ? (cell.x - minX) / (width - 1) : 0.5
     const [r, g, b] = cell.color
     colors[offset] = r
     colors[offset + 1] = g
     colors[offset + 2] = b
     mask[cellIndex] = normalizedCoverage
+    revealRatios[cellIndex] = ratio
 
     if (cellIndexLookup[cellIndex] === -1) {
+
       cellIndexLookup[cellIndex] = cellIndices.length
       cellIndices.push(cellIndex)
     }
@@ -409,6 +423,7 @@ const createTextData = (): TextData => {
     colors[offset + 1] = DEFAULT_COLOR[1]
     colors[offset + 2] = DEFAULT_COLOR[2]
     mask[cellIndex] = 0
+    revealRatios[cellIndex] = 1
   }
 
   assertInvariant(cellIndices.length > 0, 'text sampling produced empty mask')
@@ -550,6 +565,7 @@ const createTextData = (): TextData => {
   return {
     mask,
     colors,
+    revealRatios,
     cellIndices: Int32Array.from(cellIndices),
     cellIndexLookup,
   }
@@ -586,8 +602,11 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const interactiveEnabledRef = useRef<boolean>(false)
   const interactiveEnableTimerRef = useRef<number | null>(null)
   const lastFrameTimeRef = useRef<number | null>(null)
+  const textRevealProgressRef = useRef<number>(0)
+  const autoScatterTimerRef = useRef<number | null>(null)
 
   const clearScatterTimers = useCallback(() => {
+
     scatterTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     scatterTimersRef.current = []
   }, [])
@@ -637,9 +656,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     const { width, height } = canvas
     const { offsetX, offsetY, cellSize } = metricsRef.current
     const intensities = intensitiesRef.current
-    const { mask, colors } = textData
+    const { mask, colors, revealRatios } = textData
     const currentPhase = phaseRef.current
-    const textVisibility = currentPhase === 'intro' ? 1 : currentPhase === 'transition' ? 0.55 : 0
+    const revealProgress = textRevealProgressRef.current
+    const phaseVisibility = currentPhase === 'intro' ? 1 : currentPhase === 'transition' ? 0.65 : 0.45
 
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
@@ -673,8 +693,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const cellIndex = rowOffset + x
         const coverage = mask[cellIndex]
         const intensity = intensities[cellIndex]
+        const revealRatio = revealRatios[cellIndex]
+        const revealWeight = clamp((revealProgress - revealRatio) / TEXT_REVEAL_SMOOTHING, 0, 1)
 
-        if (coverage <= 0 && intensity <= MIN_VISIBLE_INTENSITY) {
+        if (coverage <= 0 && intensity <= MIN_VISIBLE_INTENSITY && revealWeight <= 0) {
           continue
         }
 
@@ -683,18 +705,19 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const baseG = colors[colorOffset + 1]
         const baseB = colors[colorOffset + 2]
 
-        const normalizedCoverage = coverage > 0 ? Math.max(coverage, 0.45) : 0
-        const baseAlpha = normalizedCoverage > 0 ? TEXT_ALPHA * textVisibility * normalizedCoverage : 0
-        const highlightAlpha = intensity * HIGHLIGHT_ALPHA
+        const normalizedCoverage = coverage > 0 ? Math.max(coverage, 0.45 * Math.max(revealWeight, 0.25)) : 0
+        const baseVisibility = phaseVisibility * revealWeight
+        const baseAlpha = normalizedCoverage > 0 ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
+        const highlightAlpha = intensity * HIGHLIGHT_ALPHA * Math.max(revealWeight, baseVisibility * 0.6)
         const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
         if (finalAlpha <= 0) {
           continue
         }
 
-        const highlightBoost = Math.min(1, intensity * 0.6 + normalizedCoverage * 0.35 * textVisibility)
-        const r = Math.round(baseR + (255 - baseR) * highlightBoost)
-        const g = Math.round(baseG + (255 - baseG) * highlightBoost)
-        const b = Math.round(baseB + (255 - baseB) * highlightBoost)
+        const highlightMix = Math.min(1, intensity * HIGHLIGHT_BLEND * Math.max(revealWeight, 0.35))
+        const r = Math.round(baseR + (255 - baseR) * highlightMix)
+        const g = Math.round(baseG + (255 - baseG) * highlightMix)
+        const b = Math.round(baseB + (255 - baseB) * highlightMix)
 
         ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha})`
         ctx.fillRect(offsetX + x * cellSize, offsetY + y * cellSize, cellSize, cellSize)
@@ -771,14 +794,26 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       const intensities = intensitiesRef.current
       const flags = textScatterFlagsRef.current
       const textCells = textData.cellIndices
+      const revealRatios = textData.revealRatios
+      const revealProgress = textRevealProgressRef.current
       const decayStep = Math.pow(DECAY_FACTOR, delta)
       let hasEnergy = false
 
-      if (!suppressIntroGlow && phaseRef.current !== 'grid') {
+      if (!suppressIntroGlow) {
         for (let index = 0; index < textCells.length; index += 1) {
-          if (flags[index] === 0) {
-            const cellIndex = textCells[index]
-            intensities[cellIndex] = 1
+          if (flags[index] !== 0) {
+            continue
+          }
+          const cellIndex = textCells[index]
+          const revealRatio = revealRatios[cellIndex]
+          const revealWeight = clamp((revealProgress - revealRatio) / TEXT_REVEAL_SMOOTHING, 0, 1)
+          if (revealWeight <= 0) {
+            intensities[cellIndex] = Math.max(0, intensities[cellIndex] * decayStep)
+            continue
+          }
+          const targetValue = Math.max(intensities[cellIndex], revealWeight)
+          intensities[cellIndex] = targetValue
+          if (targetValue > 0) {
             hasEnergy = true
           }
         }
@@ -800,21 +835,39 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
       return hasEnergy
     },
-    [textData.cellIndices],
+    [textData.cellIndices, textData.revealRatios],
   )
 
   const frame = useCallback(
     (timestamp: number) => {
       const lastTimestamp = lastFrameTimeRef.current
-      const delta = lastTimestamp === null ? 1 : Math.min((timestamp - lastTimestamp) / (1000 / 60), 2)
+      const deltaMs = lastTimestamp === null ? 16 : timestamp - lastTimestamp
+      const frameDelta = Math.min(deltaMs / (1000 / 60), 2)
       lastFrameTimeRef.current = timestamp
       animationFrameRef.current = null
 
-      const explosionHasEnergy = updateGlobalExplosion(delta)
-      const hasEnergy = explosionHasEnergy || decayIntensities({ suppressIntroGlow: explosionHasEnergy, delta })
+      if (textRevealProgressRef.current < 1) {
+        textRevealProgressRef.current = Math.min(
+          1,
+          textRevealProgressRef.current + deltaMs / TEXT_REVEAL_DURATION_MS,
+        )
+      }
+
+      const explosionHasEnergy = updateGlobalExplosion(frameDelta)
+      const hasEnergy =
+        explosionHasEnergy ||
+        decayIntensities({ suppressIntroGlow: explosionHasEnergy, delta: frameDelta })
       draw()
 
-      if (phaseRef.current !== 'grid' || hasEnergy || explosionHasEnergy || globalExplosionActiveRef.current) {
+      const needsReveal = textRevealProgressRef.current < 1
+
+      if (
+        phaseRef.current !== 'grid' ||
+        hasEnergy ||
+        explosionHasEnergy ||
+        globalExplosionActiveRef.current ||
+        needsReveal
+      ) {
         animationFrameRef.current = window.requestAnimationFrame(frame)
       } else {
         lastFrameTimeRef.current = null
@@ -926,8 +979,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       interactiveEnableTimerRef.current = window.setTimeout(() => {
         interactiveEnableTimerRef.current = null
         interactiveEnabledRef.current = true
+        globalExplosionActiveRef.current = false
+        globalExplosionParticlesRef.current = []
+        intensitiesRef.current.fill(0)
         lastFrameTimeRef.current = null
-        scheduleFrame(true)
       }, GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS)
     },
     [
@@ -1121,6 +1176,15 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       return
     }
 
+    textRevealProgressRef.current = 0
+    lastFrameTimeRef.current = null
+
+    textScatterFlagsRef.current.fill(0)
+    remainingTextCellsRef.current = textData.cellIndices.length
+    scatterStartedRef.current = false
+    scatterCompleteRef.current = false
+
+    clearScatterCompletionGuard()
     clearScatterTimers()
     clearExplosionTimers()
     clearRippleTimers()
@@ -1132,7 +1196,41 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       }, delay)
       scatterTimersRef.current.push(timer)
     })
-  }, [clearExplosionTimers, clearRippleTimers, clearScatterTimers, scatterCell, textData.cellIndices])
+
+    scheduleFrame(true)
+  }, [
+    clearExplosionTimers,
+    clearRippleTimers,
+    clearScatterCompletionGuard,
+    clearScatterTimers,
+    scatterCell,
+    scheduleFrame,
+    textData.cellIndices,
+  ])
+
+  const scheduleAutoScatter = useCallback(() => {
+    if (autoScatterTimerRef.current !== null) {
+      window.clearTimeout(autoScatterTimerRef.current)
+    }
+    autoScatterTimerRef.current = window.setTimeout(() => {
+      if (!globalExplosionActiveRef.current) {
+        scatterAll()
+      }
+      scheduleAutoScatter()
+    }, AUTO_SCATTER_INTERVAL_MS)
+  }, [scatterAll])
+
+  useEffect(() => {
+    scatterAll()
+    scheduleAutoScatter()
+
+    return () => {
+      if (autoScatterTimerRef.current !== null) {
+        window.clearTimeout(autoScatterTimerRef.current)
+        autoScatterTimerRef.current = null
+      }
+    }
+  }, [scheduleAutoScatter, scatterAll])
 
   useEffect(() => {
     if (scatterSignal === lastScatterSignalRef.current) {
@@ -1145,6 +1243,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     remainingTextCellsRef.current = textData.cellIndices.length
     scatterStartedRef.current = false
     scatterCompleteRef.current = false
+    textRevealProgressRef.current = 0
+    lastFrameTimeRef.current = null
 
     clearScatterTimers()
     clearExplosionTimers()
@@ -1222,11 +1322,17 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       clearScatterCompletionGuard()
       globalExplosionActiveRef.current = false
       globalExplosionParticlesRef.current = []
+      intensitiesRef.current.fill(0)
       lastFrameTimeRef.current = null
       if (interactiveEnableTimerRef.current !== null) {
         window.clearTimeout(interactiveEnableTimerRef.current)
         interactiveEnableTimerRef.current = null
       }
+      if (autoScatterTimerRef.current !== null) {
+        window.clearTimeout(autoScatterTimerRef.current)
+        autoScatterTimerRef.current = null
+      }
+      scheduleFrame(true)
     }
   }, [
     clearExplosionTimers,
