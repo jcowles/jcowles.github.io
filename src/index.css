@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter+Tight:wght@300;400;600;700&family=Space+Grotesk:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply m-0 min-h-screen bg-[#05060f] font-sans text-white antialiased;
+  }
+
+  a {
+    @apply text-white transition-colors duration-200;
+  }
+
+  a:hover {
+    @apply text-brand-secondary;
+  }
+
+  ::selection {
+    @apply bg-white/30 text-white;
+  }
+}
+
