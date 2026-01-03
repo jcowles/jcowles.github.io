@@ -47,10 +47,11 @@ const GLOBAL_EXPLOSION_GRAVITY = 0.22
 const GLOBAL_EXPLOSION_DRAG = 0.96
 const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
 const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
-const AUTO_SCATTER_INTERVAL_MS = SCATTER_DURATION + EXPLOSION_DURATION_MS + 600
 const TEXT_REVEAL_DURATION_MS = 3000
 const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
+const AUTO_SCATTER_INTERVAL_MS =
+  Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -607,6 +608,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const lastFrameTimeRef = useRef<number | null>(null)
   const textRevealProgressRef = useRef<number>(0)
   const autoScatterTimerRef = useRef<number | null>(null)
+  const scatterActiveRef = useRef<boolean>(false)
+  const pendingForcedScatterRef = useRef<boolean>(false)
+  const completeScatterRef = useRef<() => void>(() => {})
+
 
   const clearScatterTimers = useCallback(() => {
 
@@ -641,6 +646,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       if (!scatterCompleteRef.current) {
         scatterCompleteRef.current = true
         onScatterComplete()
+        completeScatterRef.current()
       }
     }, SCATTER_DURATION + EXPLOSION_DURATION_MS + 400)
   }, [onScatterComplete])
@@ -970,6 +976,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       globalExplosionParticlesRef.current = particles
       globalExplosionActiveRef.current = true
       interactiveEnabledRef.current = false
+      completeScatterRef.current()
       clearScatterTimers()
       clearExplosionTimers()
       clearRippleTimers()
@@ -1100,6 +1107,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
           clearScatterCompletionGuard()
           scatterCompleteRef.current = true
           onScatterComplete()
+          completeScatterRef.current()
         }
       }, SCATTER_DURATION + 180)
       scatterTimersRef.current.push(completionTimer)
@@ -1175,58 +1183,99 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     [clearExplosionTimers, getCellFromEvent, igniteCell, scatterCell],
   )
 
-  const scatterAll = useCallback(() => {
-    const indices = textData.cellIndices
-    if (indices.length === 0) {
-      return
-    }
+  const scatterAll = useCallback(
+    ({ force = false }: { force?: boolean } = {}) => {
+      const indices = textData.cellIndices
+      if (indices.length === 0) {
+        return
+      }
 
-    textRevealProgressRef.current = 0
-    lastFrameTimeRef.current = null
+      if (scatterActiveRef.current && !force) {
+        return
+      }
 
-    textScatterFlagsRef.current.fill(0)
-    remainingTextCellsRef.current = textData.cellIndices.length
-    scatterStartedRef.current = false
-    scatterCompleteRef.current = false
+      scatterActiveRef.current = true
+      pendingForcedScatterRef.current = false
 
-    clearScatterCompletionGuard()
-    clearScatterTimers()
-    clearExplosionTimers()
-    clearRippleTimers()
+      if (autoScatterTimerRef.current !== null) {
+        window.clearTimeout(autoScatterTimerRef.current)
+        autoScatterTimerRef.current = null
+      }
 
-    indices.forEach((cellIndex, order) => {
-      const delay = (order / indices.length) * 240
-      const timer = window.setTimeout(() => {
-        scatterCell(cellIndex)
-      }, delay)
-      scatterTimersRef.current.push(timer)
-    })
+      textRevealProgressRef.current = 0
+      lastFrameTimeRef.current = null
 
-    scheduleFrame(true)
-  }, [
-    clearExplosionTimers,
-    clearRippleTimers,
-    clearScatterCompletionGuard,
-    clearScatterTimers,
-    scatterCell,
-    scheduleFrame,
-    textData.cellIndices,
-  ])
+      textScatterFlagsRef.current.fill(0)
+      remainingTextCellsRef.current = textData.cellIndices.length
+      scatterStartedRef.current = false
+      scatterCompleteRef.current = false
+
+      clearScatterCompletionGuard()
+      clearScatterTimers()
+      clearExplosionTimers()
+      clearRippleTimers()
+
+      indices.forEach((cellIndex, order) => {
+        const delay = (order / indices.length) * 240
+        const timer = window.setTimeout(() => {
+          scatterCell(cellIndex)
+        }, delay)
+        scatterTimersRef.current.push(timer)
+      })
+
+      scheduleFrame(true)
+    },
+    [
+      clearExplosionTimers,
+      clearRippleTimers,
+      clearScatterCompletionGuard,
+      clearScatterTimers,
+      scatterCell,
+      scheduleFrame,
+      textData.cellIndices,
+    ],
+  )
 
   const scheduleAutoScatter = useCallback(() => {
     if (autoScatterTimerRef.current !== null) {
-      window.clearTimeout(autoScatterTimerRef.current)
+      return
     }
     autoScatterTimerRef.current = window.setTimeout(() => {
-      if (!globalExplosionActiveRef.current) {
-        scatterAll()
+      autoScatterTimerRef.current = null
+      if (globalExplosionActiveRef.current || scatterActiveRef.current) {
+        scheduleAutoScatter()
+        return
       }
-      scheduleAutoScatter()
+      if (pendingForcedScatterRef.current) {
+        scatterAll({ force: true })
+        return
+      }
+      scatterAll()
     }, AUTO_SCATTER_INTERVAL_MS)
   }, [scatterAll])
 
+  const completeScatter = useCallback(() => {
+    if (!scatterActiveRef.current) {
+      return
+    }
+    scatterActiveRef.current = false
+
+    if (pendingForcedScatterRef.current) {
+      if (globalExplosionActiveRef.current) {
+        scheduleAutoScatter()
+        return
+      }
+      pendingForcedScatterRef.current = false
+      scatterAll({ force: true })
+      return
+    }
+
+    scheduleAutoScatter()
+  }, [scatterAll, scheduleAutoScatter])
+  completeScatterRef.current = completeScatter
+
   useEffect(() => {
-    scatterAll()
+    scatterAll({ force: true })
     scheduleAutoScatter()
 
     return () => {
@@ -1244,42 +1293,13 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
     lastScatterSignalRef.current = scatterSignal
 
-    textScatterFlagsRef.current.fill(0)
-    remainingTextCellsRef.current = textData.cellIndices.length
-    scatterStartedRef.current = false
-    scatterCompleteRef.current = false
-    textRevealProgressRef.current = 0
-    lastFrameTimeRef.current = null
-
-    clearScatterTimers()
-    clearExplosionTimers()
-    clearRippleTimers()
-    clearScatterCompletionGuard()
-
-    scatterAll()
-
-    if (!scatterStartedRef.current) {
-      scatterStartedRef.current = true
-      onScatterStart()
+    if (scatterActiveRef.current || globalExplosionActiveRef.current) {
+      pendingForcedScatterRef.current = true
+      return
     }
 
-    scatterCompletionGuardRef.current = window.setTimeout(() => {
-      if (!scatterCompleteRef.current) {
-        scatterCompleteRef.current = true
-        onScatterComplete()
-      }
-    }, SCATTER_DURATION + EXPLOSION_DURATION_MS + 300)
-  }, [
-    clearExplosionTimers,
-    clearRippleTimers,
-    clearScatterCompletionGuard,
-    clearScatterTimers,
-    onScatterComplete,
-    onScatterStart,
-    scatterAll,
-    scatterSignal,
-    textData.cellIndices.length,
-  ])
+    scatterAll({ force: true })
+  }, [scatterAll, scatterSignal])
 
   const resize = useCallback(() => {
     const canvas = canvasRef.current
