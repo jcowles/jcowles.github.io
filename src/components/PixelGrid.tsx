@@ -9,7 +9,7 @@ interface PixelGridProps {
   scatterSignal: number
 }
 
-const GRID_SIZE = 64
+const GRID_SIZE = 128
 const TEXT_ALPHA = 0.85
 const HIGHLIGHT_ALPHA = 0.96
 const DECAY_FACTOR = 0.965
@@ -22,7 +22,8 @@ const RIPPLE_STEP_DELAY_MS = 22
 const EXPLOSION_RADIUS = 100
 const EXPLOSION_DURATION_MS = 380
 
-const TEXT_CONTENT = 'visualcore'
+const TEXT_CONTENT = 'VISUALCORE'
+const TEXT_SCALE_RATIO = 0.14
 
 const DEFAULT_COLOR: [number, number, number] = [118, 99, 255]
 const GRADIENT_STOPS: Array<{ stop: number; color: [number, number, number] }> = [
@@ -33,11 +34,12 @@ const GRADIENT_STOPS: Array<{ stop: number; color: [number, number, number] }> =
 
 const CANVAS_SCALE = 18
 const HORIZONTAL_MARGIN_CELLS = 2
-const VERTICAL_MARGIN_RATIO = 0.32
+const VERTICAL_MARGIN_RATIO = 0.35
 const MIN_CELLS_RATIO = 0.02
 const MAX_CELLS_RATIO = 0.2
 const COVERAGE_THRESHOLD = 0.35
 const MAX_ALPHA_MULTIPLIER = 1
+const SAMPLE_ALPHA_THRESHOLD = 0.5
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -47,7 +49,69 @@ function assertInvariant(condition: unknown, message: string): asserts condition
   }
 }
 
+interface DownsampledCell {
+  cellIndex: number
+  coverage: number
+  x: number
+  y: number
+}
+
+const downsampleCanvasCoverage = (
+  imageData: Uint8ClampedArray,
+  canvasWidth: number,
+  canvasHeight: number,
+  gridSize: number,
+  scale: number,
+  alphaThreshold: number,
+  coverageThreshold: number,
+): { cells: DownsampledCell[]; maxCoverage: number } => {
+  const cells: DownsampledCell[] = []
+  let maxCoverage = 0
+
+  for (let gridY = 0; gridY < gridSize; gridY += 1) {
+    for (let gridX = 0; gridX < gridSize; gridX += 1) {
+      let positiveCount = 0
+      let sampleCount = 0
+
+      for (let sy = 0; sy < scale; sy += 1) {
+        const pixelY = gridY * scale + sy
+        if (pixelY >= canvasHeight) {
+          continue
+        }
+        for (let sx = 0; sx < scale; sx += 1) {
+          const pixelX = gridX * scale + sx
+          if (pixelX >= canvasWidth) {
+            continue
+          }
+          const index = (pixelY * canvasWidth + pixelX) * 4 + 1
+          const alpha = imageData[index] / 255
+          sampleCount += 1
+          if (alpha >= alphaThreshold) {
+            positiveCount += 1
+          }
+        }
+      }
+
+      if (sampleCount === 0) {
+        continue
+      }
+
+      const coverage = positiveCount / sampleCount
+      if (coverage < coverageThreshold) {
+        continue
+      }
+
+      maxCoverage = Math.max(maxCoverage, coverage)
+      cells.push({ cellIndex: gridY * gridSize + gridX, coverage, x: gridX, y: gridY })
+    }
+  }
+
+  return { cells, maxCoverage }
+}
+
 const createMaskPreview = (mask: Float32Array, colors: Float32Array): string => {
+
+
   if (typeof document === 'undefined') {
     return ''
   }
@@ -206,38 +270,23 @@ const createTextData = (): TextData => {
   ctx.fillStyle = '#fff'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.font = `700 ${Math.floor(canvas.height * 0.58)}px "Inter", "Poppins", sans-serif`
+  ctx.font = `700 ${Math.floor(canvas.height * TEXT_SCALE_RATIO)}px "Inter", "Poppins", sans-serif`
   ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
 
   const sourceDataURL = typeof canvas.toDataURL === 'function' ? canvas.toDataURL('image/png') : ''
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
 
-  const cells: Array<{ cellIndex: number; coverage: number; x: number; y: number }> = []
-  let maxCoverage = 0
+  const { cells, maxCoverage } = downsampleCanvasCoverage(
+    imageData,
+    canvas.width,
+    canvas.height,
+    GRID_SIZE,
+    CANVAS_SCALE,
+    SAMPLE_ALPHA_THRESHOLD,
+    COVERAGE_THRESHOLD,
+  )
 
-  for (let y = 0; y < GRID_SIZE; y += 1) {
-    for (let x = 0; x < GRID_SIZE; x += 1) {
-      let alphaSum = 0
-      for (let sy = 0; sy < CANVAS_SCALE; sy += 1) {
-        for (let sx = 0; sx < CANVAS_SCALE; sx += 1) {
-          const pixelX = x * CANVAS_SCALE + sx
-          const pixelY = y * CANVAS_SCALE + sy
-          const index = (pixelY * canvas.width + pixelX) * 4 + 3
-          alphaSum += imageData[index]
-        }
-      }
-
-      const coverage = alphaSum / (CANVAS_SCALE * CANVAS_SCALE * 255)
-      if (coverage < COVERAGE_THRESHOLD) {
-        continue
-      }
-
-      maxCoverage = Math.max(maxCoverage, coverage)
-      cells.push({ cellIndex: y * GRID_SIZE + x, coverage, x, y })
-    }
-  }
-
-  if (cells.length === 0) {
+  if (cells.length === 0 || maxCoverage <= 0) {
     return createFallbackTextData(totalCells, cellIndexLookup)
   }
 
@@ -262,17 +311,19 @@ const createTextData = (): TextData => {
 
   const maxOffsetX = Math.max(0, GRID_SIZE - width)
   const preferredOffsetX = Math.floor((GRID_SIZE - width) / 2)
-  const offsetX = Math.max(
-    Math.min(preferredOffsetX, maxOffsetX),
+  const offsetX = clamp(
+    preferredOffsetX,
     Math.min(HORIZONTAL_MARGIN_CELLS, maxOffsetX),
+    maxOffsetX,
   )
 
   const verticalMarginCells = Math.floor(GRID_SIZE * VERTICAL_MARGIN_RATIO)
   const maxOffsetY = Math.max(0, GRID_SIZE - height)
   const preferredOffsetY = Math.floor((GRID_SIZE - height) / 2)
-  const offsetY = Math.max(
-    Math.min(preferredOffsetY, maxOffsetY),
+  const offsetY = clamp(
+    preferredOffsetY,
     Math.min(verticalMarginCells, maxOffsetY),
+    maxOffsetY,
   )
 
   mask.fill(0)
@@ -282,7 +333,7 @@ const createTextData = (): TextData => {
     const targetY = clamp(cell.y - minY + offsetY, 0, GRID_SIZE - 1)
     const cellIndex = targetY * GRID_SIZE + targetX
 
-    const normalizedCoverage = maxCoverage > 0 ? clamp((cell.coverage / maxCoverage) * MAX_ALPHA_MULTIPLIER, 0, 1) : 0
+    const normalizedCoverage = clamp((cell.coverage / maxCoverage) * MAX_ALPHA_MULTIPLIER, 0, 1)
 
     if (mask[cellIndex] >= normalizedCoverage) {
       return
@@ -301,6 +352,7 @@ const createTextData = (): TextData => {
       cellIndices.push(cellIndex)
     }
   })
+
 
   for (let cellIndex = 0; cellIndex < totalCells; cellIndex += 1) {
     if (cellIndexLookup[cellIndex] !== -1) {
@@ -985,4 +1037,5 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 }
 
 export default PixelGrid
+export { downsampleCanvasCoverage }
 export { createTextData }

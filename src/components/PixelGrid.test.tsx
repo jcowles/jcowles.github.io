@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { createTextData } from './PixelGrid'
+import { createTextData, downsampleCanvasCoverage } from './PixelGrid'
 
 const GRID_SIZE = 64
 
@@ -121,6 +121,44 @@ const buildCoverageCanvasStub = (coverage: CoverageCell[]) => {
 
   return canvas as unknown as HTMLCanvasElement
 }
+
+describe('downsampleCanvasCoverage', () => {
+  test('aggregates alpha coverage into grid cells', () => {
+    const gridSize = 4
+    const scale = 2
+    const width = gridSize * scale
+    const height = gridSize * scale
+    const imageData = new Uint8ClampedArray(width * height * 4)
+
+    const fillCell = (cellX: number, cellY: number, alpha: number) => {
+      for (let sy = 0; sy < scale; sy += 1) {
+        const pixelY = cellY * scale + sy
+        for (let sx = 0; sx < scale; sx += 1) {
+          const pixelX = cellX * scale + sx
+          const index = (pixelY * width + pixelX) * 4
+          imageData[index + 3] = alpha
+        }
+      }
+    }
+
+    fillCell(0, 0, 255)
+    fillCell(1, 0, 128)
+    fillCell(2, 0, 64)
+
+    const { cells, maxCoverage } = downsampleCanvasCoverage(imageData, width, height, gridSize, scale, 0.05)
+
+    expect(cells.length).toBe(3)
+    expect(maxCoverage).toBeGreaterThan(0.9)
+
+    expect(cells[0].coverage).toBeCloseTo(1, 3)
+    expect(cells[1].coverage).toBeCloseTo(0.5, 2)
+    expect(cells[2].coverage).toBeCloseTo(0.25, 2)
+
+    expect(cells[0].cellIndex).toBe(0)
+    expect(cells[1].cellIndex).toBe(1)
+    expect(cells[2].cellIndex).toBe(2)
+  })
+})
 
 describe('createTextData splash mask', () => {
   const withCanvasStub = (factory: () => HTMLCanvasElement, run: () => void) => {
