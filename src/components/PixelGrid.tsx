@@ -41,6 +41,13 @@ const COVERAGE_THRESHOLD = 0.35
 const MAX_ALPHA_MULTIPLIER = 1
 const SAMPLE_ALPHA_THRESHOLD = 0.5
 
+const GLOBAL_EXPLOSION_BASE_SPEED = 1.45
+const GLOBAL_EXPLOSION_SPEED_JITTER = 0.55
+const GLOBAL_EXPLOSION_GRAVITY = 0.22
+const GLOBAL_EXPLOSION_DRAG = 0.96
+const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
+const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
+
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
 function assertInvariant(condition: unknown, message: string): asserts condition {
@@ -54,6 +61,16 @@ interface DownsampledCell {
   coverage: number
   x: number
   y: number
+  color: [number, number, number]
+}
+
+interface ExplosionParticle {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  intensity: number
+  color: [number, number, number]
 }
 
 const downsampleCanvasCoverage = (
@@ -72,6 +89,9 @@ const downsampleCanvasCoverage = (
     for (let gridX = 0; gridX < gridSize; gridX += 1) {
       let positiveCount = 0
       let sampleCount = 0
+      let rSum = 0
+      let gSum = 0
+      let bSum = 0
 
       for (let sy = 0; sy < scale; sy += 1) {
         const pixelY = gridY * scale + sy
@@ -83,11 +103,17 @@ const downsampleCanvasCoverage = (
           if (pixelX >= canvasWidth) {
             continue
           }
-          const index = (pixelY * canvasWidth + pixelX) * 4 + 1
-          const alpha = imageData[index] / 255
+          const pixelIndex = (pixelY * canvasWidth + pixelX) * 4
+          const r = imageData[pixelIndex]
+          const g = imageData[pixelIndex + 1]
+          const b = imageData[pixelIndex + 2]
+          const intensity = Math.max(r, g, b) / 255
           sampleCount += 1
-          if (alpha >= alphaThreshold) {
+          if (intensity >= alphaThreshold) {
             positiveCount += 1
+            rSum += r
+            gSum += g
+            bSum += b
           }
         }
       }
@@ -101,8 +127,14 @@ const downsampleCanvasCoverage = (
         continue
       }
 
+      const color: [number, number, number] = [
+        Math.round(rSum / Math.max(positiveCount, 1)),
+        Math.round(gSum / Math.max(positiveCount, 1)),
+        Math.round(bSum / Math.max(positiveCount, 1)),
+      ]
+
       maxCoverage = Math.max(maxCoverage, coverage)
-      cells.push({ cellIndex: gridY * gridSize + gridX, coverage, x: gridX, y: gridY })
+      cells.push({ cellIndex: gridY * gridSize + gridX, coverage, x: gridX, y: gridY, color })
     }
   }
 
@@ -267,10 +299,25 @@ const createTextData = (): TextData => {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.fillStyle = '#000'
   ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.fillStyle = '#fff'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.font = `700 ${Math.floor(canvas.height * TEXT_SCALE_RATIO)}px "Inter", "Poppins", sans-serif`
+
+  if (typeof ctx.createLinearGradient === 'function') {
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0)
+    if (GRADIENT_STOPS.length > 0) {
+      GRADIENT_STOPS.forEach(({ stop, color }) => {
+        gradient.addColorStop(stop, `rgb(${color[0]}, ${color[1]}, ${color[2]})`)
+      })
+    } else {
+      gradient.addColorStop(0, '#ffffff')
+      gradient.addColorStop(1, '#ffffff')
+    }
+    ctx.fillStyle = gradient
+  } else {
+    ctx.fillStyle = '#ffffff'
+  }
+
   ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
 
   const sourceDataURL = typeof canvas.toDataURL === 'function' ? canvas.toDataURL('image/png') : ''
@@ -340,8 +387,7 @@ const createTextData = (): TextData => {
     }
 
     const offset = cellIndex * 3
-    const ratio = width > 1 ? (cell.x - minX) / (width - 1) : 0.5
-    const [r, g, b] = sampleGradient(ratio)
+    const [r, g, b] = cell.color
     colors[offset] = r
     colors[offset + 1] = g
     colors[offset + 2] = b
@@ -534,6 +580,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const rippleTimersRef = useRef<number[]>([])
   const phaseRef = useRef<Phase>(phase)
   const lastScatterSignalRef = useRef<number>(scatterSignal)
+  const globalExplosionParticlesRef = useRef<ExplosionParticle[]>([])
+  const globalExplosionActiveRef = useRef<boolean>(false)
+  const firstInteractionHandledRef = useRef<boolean>(false)
+  const interactiveEnabledRef = useRef<boolean>(false)
+  const interactiveEnableTimerRef = useRef<number | null>(null)
+  const lastFrameTimeRef = useRef<number | null>(null)
 
   const clearScatterTimers = useCallback(() => {
     scatterTimersRef.current.forEach((timer) => window.clearTimeout(timer))
@@ -592,6 +644,29 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
 
+    if (globalExplosionActiveRef.current && globalExplosionParticlesRef.current.length > 0) {
+      const explosionCellSize = metricsRef.current.cellSize
+      const drawSize = Math.max(explosionCellSize * 0.9, 1)
+      const sizeOffset = (explosionCellSize - drawSize) / 2
+
+      for (let index = 0; index < globalExplosionParticlesRef.current.length; index += 1) {
+        const particle = globalExplosionParticlesRef.current[index]
+        if (particle.intensity <= MIN_VISIBLE_INTENSITY) {
+          continue
+        }
+
+        const alpha = Math.min(1, particle.intensity)
+        const centerX = offsetX + particle.x * explosionCellSize
+        const centerY = offsetY + particle.y * explosionCellSize
+        const drawX = centerX - explosionCellSize / 2 + sizeOffset
+        const drawY = centerY - explosionCellSize / 2 + sizeOffset
+        ctx.fillStyle = `rgba(${particle.color[0]}, ${particle.color[1]}, ${particle.color[2]}, ${alpha})`
+        ctx.fillRect(drawX, drawY, drawSize, drawSize)
+      }
+
+      return
+    }
+
     for (let y = 0; y < GRID_SIZE; y += 1) {
       const rowOffset = y * GRID_SIZE
       for (let x = 0; x < GRID_SIZE; x += 1) {
@@ -625,57 +700,246 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         ctx.fillRect(offsetX + x * cellSize, offsetY + y * cellSize, cellSize, cellSize)
       }
     }
-  }, [textData])
+  }, [globalExplosionActiveRef, globalExplosionParticlesRef, textData])
 
-  const decayIntensities = useCallback(() => {
-    const intensities = intensitiesRef.current
-    const flags = textScatterFlagsRef.current
-    const textCells = textData.cellIndices
-    let hasEnergy = false
-
-    if (phaseRef.current !== 'grid') {
-      for (let index = 0; index < textCells.length; index += 1) {
-        if (flags[index] === 0) {
-          const cellIndex = textCells[index]
-          intensities[cellIndex] = 1
-          hasEnergy = true
-        }
-      }
+  const updateGlobalExplosion = useCallback((delta = 1) => {
+    if (!globalExplosionActiveRef.current) {
+      return false
     }
 
-    for (let index = 0; index < intensities.length; index += 1) {
-      const value = intensities[index]
-      if (value <= MIN_VISIBLE_INTENSITY) {
-        intensities[index] = 0
+    const particles = globalExplosionParticlesRef.current
+    if (particles.length === 0) {
+      globalExplosionActiveRef.current = false
+      intensitiesRef.current.fill(0)
+      return false
+    }
+
+    const dragStep = Math.pow(GLOBAL_EXPLOSION_DRAG, delta)
+    const intensityDecay = Math.pow(GLOBAL_EXPLOSION_INTENSITY_DECAY, delta)
+    const gravityStep = GLOBAL_EXPLOSION_GRAVITY * delta
+
+    const nextParticles: ExplosionParticle[] = []
+    const intensities = intensitiesRef.current
+    intensities.fill(0)
+    let hasEnergy = false
+
+    for (let index = 0; index < particles.length; index += 1) {
+      const particle = particles[index]
+      particle.vx *= dragStep
+      particle.vy = (particle.vy + gravityStep) * dragStep
+      particle.x += particle.vx * delta
+      particle.y += particle.vy * delta
+      particle.intensity *= intensityDecay
+
+      if (particle.intensity <= MIN_VISIBLE_INTENSITY) {
         continue
       }
 
-      const next = value * DECAY_FACTOR
-      intensities[index] = next <= MIN_VISIBLE_INTENSITY ? 0 : next
-      if (intensities[index] > 0) {
-        hasEnergy = true
+      if (particle.x < -1 || particle.x > GRID_SIZE || particle.y < -1 || particle.y > GRID_SIZE + 6) {
+        continue
       }
+
+      hasEnergy = true
+
+      if (particle.x >= 0 && particle.x < GRID_SIZE && particle.y >= 0 && particle.y < GRID_SIZE) {
+        const cellX = Math.floor(particle.x)
+        const cellY = Math.floor(particle.y)
+        const cellIndex = cellY * GRID_SIZE + cellX
+        const normalizedIntensity = Math.min(1, particle.intensity)
+        if (intensities[cellIndex] < normalizedIntensity) {
+          intensities[cellIndex] = normalizedIntensity
+        }
+      }
+
+      nextParticles.push(particle)
     }
 
-    return hasEnergy
-  }, [textData.cellIndices])
+    globalExplosionParticlesRef.current = nextParticles
 
-  const frame = useCallback(() => {
-    animationFrameRef.current = null
-    const hasEnergy = decayIntensities()
-    draw()
+    if (!hasEnergy) {
+      globalExplosionActiveRef.current = false
+      globalExplosionParticlesRef.current = []
+      intensities.fill(0)
+      return false
+    }
 
-    if (phaseRef.current !== 'grid' || hasEnergy) {
+    return true
+  }, [])
+
+  const decayIntensities = useCallback(
+    ({ suppressIntroGlow = false, delta = 1 }: { suppressIntroGlow?: boolean; delta?: number } = {}) => {
+      const intensities = intensitiesRef.current
+      const flags = textScatterFlagsRef.current
+      const textCells = textData.cellIndices
+      const decayStep = Math.pow(DECAY_FACTOR, delta)
+      let hasEnergy = false
+
+      if (!suppressIntroGlow && phaseRef.current !== 'grid') {
+        for (let index = 0; index < textCells.length; index += 1) {
+          if (flags[index] === 0) {
+            const cellIndex = textCells[index]
+            intensities[cellIndex] = 1
+            hasEnergy = true
+          }
+        }
+      }
+
+      for (let index = 0; index < intensities.length; index += 1) {
+        const value = intensities[index]
+        if (value <= MIN_VISIBLE_INTENSITY) {
+          intensities[index] = 0
+          continue
+        }
+
+        const next = value * decayStep
+        intensities[index] = next <= MIN_VISIBLE_INTENSITY ? 0 : next
+        if (intensities[index] > 0) {
+          hasEnergy = true
+        }
+      }
+
+      return hasEnergy
+    },
+    [textData.cellIndices],
+  )
+
+  const frame = useCallback(
+    (timestamp: number) => {
+      const lastTimestamp = lastFrameTimeRef.current
+      const delta = lastTimestamp === null ? 1 : Math.min((timestamp - lastTimestamp) / (1000 / 60), 2)
+      lastFrameTimeRef.current = timestamp
+      animationFrameRef.current = null
+
+      const explosionHasEnergy = updateGlobalExplosion(delta)
+      const hasEnergy = explosionHasEnergy || decayIntensities({ suppressIntroGlow: explosionHasEnergy, delta })
+      draw()
+
+      if (phaseRef.current !== 'grid' || hasEnergy || explosionHasEnergy || globalExplosionActiveRef.current) {
+        animationFrameRef.current = window.requestAnimationFrame(frame)
+      } else {
+        lastFrameTimeRef.current = null
+      }
+    },
+    [decayIntensities, draw, updateGlobalExplosion],
+  )
+
+  const scheduleFrame = useCallback(
+    (force = false) => {
+      if (animationFrameRef.current !== null) {
+        if (!force) {
+          return
+        }
+        window.cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
       animationFrameRef.current = window.requestAnimationFrame(frame)
-    }
-  }, [decayIntensities, draw])
+    },
+    [frame],
+  )
 
-  const scheduleFrame = useCallback(() => {
-    if (animationFrameRef.current !== null) {
-      return
+  const getCellFromEvent = useCallback((event: PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) {
+      return null
     }
-    animationFrameRef.current = window.requestAnimationFrame(frame)
-  }, [frame])
+
+    const rect = canvas.getBoundingClientRect()
+    const dpr = dprRef.current
+    const { offsetX, offsetY, cellSize } = metricsRef.current
+
+    const positionX = (event.clientX - rect.left) * dpr - offsetX
+    const positionY = (event.clientY - rect.top) * dpr - offsetY
+
+    if (positionX < 0 || positionY < 0) {
+      return null
+    }
+
+    const cellX = Math.floor(positionX / cellSize)
+    const cellY = Math.floor(positionY / cellSize)
+
+    if (cellX < 0 || cellX >= GRID_SIZE || cellY < 0 || cellY >= GRID_SIZE) {
+      return null
+    }
+
+    return { cellX, cellY, cellIndex: cellY * GRID_SIZE + cellX }
+  }, [])
+
+  const startGlobalExplosion = useCallback(
+    (event: PointerEvent<HTMLCanvasElement> | null) => {
+      if (globalExplosionActiveRef.current) {
+        return
+      }
+
+      const coords = event ? getCellFromEvent(event) : null
+      const originX = coords?.cellX ?? Math.floor(GRID_SIZE / 2)
+      const originY = coords?.cellY ?? Math.floor(GRID_SIZE / 2)
+      const particles: ExplosionParticle[] = []
+      const originCenterX = originX + 0.5
+      const originCenterY = originY + 0.5
+      const { mask, colors } = textData
+
+      for (let y = 0; y < GRID_SIZE; y += 1) {
+        for (let x = 0; x < GRID_SIZE; x += 1) {
+          const cellIndex = y * GRID_SIZE + x
+          const pointX = x + 0.5
+          const pointY = y + 0.5
+          const dx = pointX - originCenterX
+          const dy = pointY - originCenterY
+          const distance = Math.hypot(dx, dy) || 1
+          const directionX = dx / distance
+          const directionY = dy / distance
+          const speed = GLOBAL_EXPLOSION_BASE_SPEED + Math.random() * GLOBAL_EXPLOSION_SPEED_JITTER
+          const jitter = (Math.random() - 0.5) * 0.6
+          const jitterCos = Math.cos(jitter)
+          const jitterSin = Math.sin(jitter)
+          const rotatedX = directionX * jitterCos - directionY * jitterSin
+          const rotatedY = directionX * jitterSin + directionY * jitterCos
+          const offset = cellIndex * 3
+          const color: [number, number, number] = [colors[offset], colors[offset + 1], colors[offset + 2]]
+          const baseIntensity = mask[cellIndex] > 0 ? clamp(mask[cellIndex] * 1.25, 0.4, 1) : 0.35
+
+          particles.push({
+            x: pointX,
+            y: pointY,
+            vx: rotatedX * speed,
+            vy: rotatedY * speed - speed * 0.45,
+            intensity: baseIntensity,
+            color,
+          })
+        }
+      }
+
+      globalExplosionParticlesRef.current = particles
+      globalExplosionActiveRef.current = true
+      interactiveEnabledRef.current = false
+      clearScatterTimers()
+      clearExplosionTimers()
+      clearRippleTimers()
+      clearScatterCompletionGuard()
+      intensitiesRef.current.fill(0)
+      lastFrameTimeRef.current = null
+      scheduleFrame(true)
+
+      if (interactiveEnableTimerRef.current !== null) {
+        window.clearTimeout(interactiveEnableTimerRef.current)
+      }
+      interactiveEnableTimerRef.current = window.setTimeout(() => {
+        interactiveEnableTimerRef.current = null
+        interactiveEnabledRef.current = true
+        lastFrameTimeRef.current = null
+        scheduleFrame(true)
+      }, GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS)
+    },
+    [
+      clearExplosionTimers,
+      clearRippleTimers,
+      clearScatterCompletionGuard,
+      clearScatterTimers,
+      getCellFromEvent,
+      scheduleFrame,
+      textData,
+    ],
+  )
 
   const igniteCell = useCallback(
     (cellX: number, cellY: number, intensity = 1) => {
@@ -790,35 +1054,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     ],
   )
 
-  const getCellFromEvent = useCallback((event: PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current
-    if (!canvas) {
-      return null
-    }
-
-    const rect = canvas.getBoundingClientRect()
-    const dpr = dprRef.current
-    const { offsetX, offsetY, cellSize } = metricsRef.current
-
-    const positionX = (event.clientX - rect.left) * dpr - offsetX
-    const positionY = (event.clientY - rect.top) * dpr - offsetY
-
-    if (positionX < 0 || positionY < 0) {
-      return null
-    }
-
-    const cellX = Math.floor(positionX / cellSize)
-    const cellY = Math.floor(positionY / cellSize)
-
-    if (cellX < 0 || cellX >= GRID_SIZE || cellY < 0 || cellY >= GRID_SIZE) {
-      return null
-    }
-
-    return { cellX, cellY, cellIndex: cellY * GRID_SIZE + cellX }
-  }, [])
-
   const handlePointerActivation = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
+      if (!interactiveEnabledRef.current || globalExplosionActiveRef.current) {
+        return
+      }
+
       const coords = getCellFromEvent(event)
       if (!coords) {
         return
@@ -833,6 +1074,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
   const triggerExplosion = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
+      if (!interactiveEnabledRef.current || globalExplosionActiveRef.current) {
+        return
+      }
+
       const coords = getCellFromEvent(event)
       if (!coords) {
         return
@@ -975,6 +1220,13 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       clearExplosionTimers()
       clearRippleTimers()
       clearScatterCompletionGuard()
+      globalExplosionActiveRef.current = false
+      globalExplosionParticlesRef.current = []
+      lastFrameTimeRef.current = null
+      if (interactiveEnableTimerRef.current !== null) {
+        window.clearTimeout(interactiveEnableTimerRef.current)
+        interactiveEnableTimerRef.current = null
+      }
     }
   }, [
     clearExplosionTimers,
@@ -1019,10 +1271,20 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
+      if (!firstInteractionHandledRef.current) {
+        firstInteractionHandledRef.current = true
+        startGlobalExplosion(event)
+        return
+      }
+
+      if (!interactiveEnabledRef.current || globalExplosionActiveRef.current) {
+        return
+      }
+
       handlePointerActivation(event)
       triggerExplosion(event)
     },
-    [handlePointerActivation, triggerExplosion],
+    [handlePointerActivation, startGlobalExplosion, triggerExplosion],
   )
 
   return (
