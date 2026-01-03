@@ -51,11 +51,15 @@ const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 const AUTO_SCATTER_INTERVAL_MS =
   Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
-const SCATTER_PARTICLE_SPEED_MIN = 1
-const SCATTER_PARTICLE_SPEED_MAX = 2
+const SCATTER_PARTICLE_SPEED_MIN = .1
+const SCATTER_PARTICLE_SPEED_MAX = 1
 const SCATTER_PARTICLE_DRAG = 0.99
 const SCATTER_PARTICLE_INTENSITY_DECAY = 0.9
-const SCATTER_PARTICLE_MIN_INTENSITY = 0.0015
+const SCATTER_PARTICLE_MIN_INTENSITY = 0.004
+const SCATTER_PARTICLE_MAX_AGE_MS = 400
+const SCATTER_PARTICLE_MAX_COUNT = 100
+const SCATTER_PARTICLE_FRAME_MS = 1000 / 60
+const TRAIL_RELEASE_MAX_AGE_MS = 100
 const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -101,6 +105,7 @@ interface ScatterParticle {
   vx: number
   vy: number
   intensity: number
+  ageMs: number
   lastCellIndex: number
 }
 
@@ -643,6 +648,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   >(() => {})
   const pendingTextScatterRef = useRef<number[]>([])
   const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
+  const intensityAgeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const textRevealTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
   const particleSpawnInitRef = useRef(false)
   if (!particleSpawnInitRef.current) {
@@ -669,6 +675,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
   const depositIntensity = useCallback((cellIndex: number, value: number) => {
     const intensities = intensitiesRef.current
+    const ages = intensityAgeRef.current
     if (cellIndex < 0 || cellIndex >= intensities.length || value <= 0) {
       return
     }
@@ -676,6 +683,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     if (intensities[cellIndex] < clamped) {
       intensities[cellIndex] = clamped
     }
+    ages[cellIndex] = 0
   }, [])
 
   const clearScatterCompletionGuard = useCallback(() => {
@@ -868,8 +876,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         particle.x += particle.vx * delta
         particle.y += particle.vy * delta
         particle.intensity *= decayStep
+        particle.ageMs += delta * SCATTER_PARTICLE_FRAME_MS
 
-        if (particle.intensity <= SCATTER_PARTICLE_MIN_INTENSITY) {
+        if (
+          particle.intensity <= SCATTER_PARTICLE_MIN_INTENSITY ||
+          particle.ageMs >= SCATTER_PARTICLE_MAX_AGE_MS
+        ) {
           continue
         }
 
@@ -908,6 +920,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       const decayStep = Math.pow(DECAY_FACTOR, delta)
       let hasEnergy = false
 
+      const ages = intensityAgeRef.current
       if (!suppressIntroGlow) {
         const revealTriggered = textRevealTriggeredRef.current
         const pendingTextScatter = pendingTextScatterRef.current
@@ -926,10 +939,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
           if (revealWeight <= 0) {
             intensities[cellIndex] = Math.max(0, intensities[cellIndex] * decayStep)
+            ages[cellIndex] += delta * SCATTER_PARTICLE_FRAME_MS
             continue
           }
           const targetValue = Math.max(intensities[cellIndex], revealWeight)
           intensities[cellIndex] = targetValue
+          ages[cellIndex] = 0
           if (targetValue > 0) {
             hasEnergy = true
           }
@@ -940,14 +955,24 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const value = intensities[index]
         if (value <= MIN_VISIBLE_INTENSITY) {
           intensities[index] = 0
+          ages[index] = 0
+          continue
+        }
+
+        ages[index] += delta * SCATTER_PARTICLE_FRAME_MS
+        if (ages[index] >= TRAIL_RELEASE_MAX_AGE_MS) {
+          intensities[index] = 0
+          ages[index] = 0
           continue
         }
 
         const next = value * decayStep
         intensities[index] = next <= MIN_VISIBLE_INTENSITY ? 0 : next
-        if (intensities[index] > 0) {
-          hasEnergy = true
+        if (intensities[index] === 0) {
+          ages[index] = 0
+          continue
         }
+        hasEnergy = true
       }
 
       return hasEnergy
@@ -1032,12 +1057,17 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       const speed =
         SCATTER_PARTICLE_SPEED_MIN +
         Math.random() * (SCATTER_PARTICLE_SPEED_MAX - SCATTER_PARTICLE_SPEED_MIN)
+      if (scatterParticlesRef.current.length >= SCATTER_PARTICLE_MAX_COUNT) {
+        scatterParticlesRef.current.shift()
+      }
+
       const particle: ScatterParticle = {
         x: cellX + 0.5,
         y: cellY + 0.5,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         intensity,
+        ageMs: 0,
         lastCellIndex: cellIndex,
       }
 
@@ -1181,9 +1211,11 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
       const index = cellY * GRID_SIZE + cellX
       const intensities = intensitiesRef.current
+      const ages = intensityAgeRef.current
       const clamped = Math.min(Math.max(intensity, 0), 1)
       const next = Math.max(intensities[index], clamped)
       intensities[index] = next
+      ages[index] = 0
 
       if (clamped >= 0.9) {
         trySpawnParticleForHighlight(index, clamped)
@@ -1384,6 +1416,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
+      intensityAgeRef.current.fill(0)
 
       clearScatterCompletionGuard()
       clearScatterTimers()
@@ -1519,6 +1552,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
+      intensityAgeRef.current.fill(0)
       lastFrameTimeRef.current = null
       if (interactiveEnableTimerRef.current !== null) {
         window.clearTimeout(interactiveEnableTimerRef.current)
@@ -1551,6 +1585,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
+      intensityAgeRef.current.fill(0)
       clearScatterTimers()
       clearExplosionTimers()
       clearRippleTimers()
