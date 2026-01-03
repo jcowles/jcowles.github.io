@@ -32,10 +32,12 @@ const GRADIENT_STOPS: Array<{ stop: number; color: [number, number, number] }> =
 ]
 
 const CANVAS_SCALE = 18
-const HORIZONTAL_PADDING_CELLS = 2
-const VERTICAL_PADDING_RATIO = 0.35
-const MIN_CELLS_RATIO = 0.08
-const MAX_CELLS_RATIO = 0.28
+const HORIZONTAL_MARGIN_CELLS = 2
+const VERTICAL_MARGIN_RATIO = 0.32
+const MIN_CELLS_RATIO = 0.02
+const MAX_CELLS_RATIO = 0.2
+const COVERAGE_THRESHOLD = 0.35
+const MAX_ALPHA_MULTIPLIER = 1
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -43,6 +45,53 @@ function assertInvariant(condition: unknown, message: string): asserts condition
   if (!condition) {
     throw new Error(`[PixelGrid] ${message}`)
   }
+}
+
+const createMaskPreview = (mask: Float32Array, colors: Float32Array): string => {
+  if (typeof document === 'undefined') {
+    return ''
+  }
+
+  const previewCanvas = document.createElement('canvas')
+  previewCanvas.width = GRID_SIZE
+  previewCanvas.height = GRID_SIZE
+  const previewCtx = previewCanvas.getContext('2d')
+  if (!previewCtx) {
+    return ''
+  }
+
+  previewCtx.clearRect(0, 0, GRID_SIZE, GRID_SIZE)
+  previewCtx.fillStyle = '#05060f'
+  previewCtx.fillRect(0, 0, GRID_SIZE, GRID_SIZE)
+  previewCtx.imageSmoothingEnabled = false
+
+  if (typeof previewCtx.createImageData === 'function') {
+    const imageData = previewCtx.createImageData(GRID_SIZE, GRID_SIZE)
+    for (let i = 0; i < mask.length; i += 1) {
+      const value = clamp(mask[i], 0, 1)
+      const offset = i * 4
+      const colorOffset = i * 3
+      imageData.data[offset] = colors[colorOffset]
+      imageData.data[offset + 1] = colors[colorOffset + 1]
+      imageData.data[offset + 2] = colors[colorOffset + 2]
+      imageData.data[offset + 3] = Math.round(value * 255)
+    }
+    previewCtx.putImageData(imageData, 0, 0)
+  } else {
+    for (let i = 0; i < mask.length; i += 1) {
+      const value = clamp(mask[i], 0, 1)
+      if (value <= 0) {
+        continue
+      }
+      const x = i % GRID_SIZE
+      const y = Math.floor(i / GRID_SIZE)
+      const colorOffset = i * 3
+      previewCtx.fillStyle = `rgba(${colors[colorOffset]}, ${colors[colorOffset + 1]}, ${colors[colorOffset + 2]}, ${value})`
+      previewCtx.fillRect(x, y, 1, 1)
+    }
+  }
+
+  return typeof previewCanvas.toDataURL === 'function' ? previewCanvas.toDataURL('image/png') : ''
 }
 
 const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array): TextData => {
@@ -160,7 +209,9 @@ const createTextData = (): TextData => {
   ctx.font = `700 ${Math.floor(canvas.height * 0.58)}px "Inter", "Poppins", sans-serif`
   ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
 
+  const sourceDataURL = typeof canvas.toDataURL === 'function' ? canvas.toDataURL('image/png') : ''
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+
   const cells: Array<{ cellIndex: number; coverage: number; x: number; y: number }> = []
   let maxCoverage = 0
 
@@ -177,66 +228,69 @@ const createTextData = (): TextData => {
       }
 
       const coverage = alphaSum / (CANVAS_SCALE * CANVAS_SCALE * 255)
-      if (coverage > 0) {
-        maxCoverage = Math.max(maxCoverage, coverage)
+      if (coverage < COVERAGE_THRESHOLD) {
+        continue
       }
 
+      maxCoverage = Math.max(maxCoverage, coverage)
       cells.push({ cellIndex: y * GRID_SIZE + x, coverage, x, y })
     }
   }
 
-  const filledCells = cells.filter((cell) => cell.coverage > 0)
-  if (filledCells.length === 0) {
+  if (cells.length === 0) {
     return createFallbackTextData(totalCells, cellIndexLookup)
   }
 
-  filledCells.sort((a, b) => b.coverage - a.coverage)
+  cells.sort((a, b) => b.coverage - a.coverage)
 
   const minCells = Math.floor(GRID_SIZE * GRID_SIZE * MIN_CELLS_RATIO)
   const maxCells = Math.floor(GRID_SIZE * GRID_SIZE * MAX_CELLS_RATIO)
-  const keepCount = clamp(filledCells.length, minCells, maxCells)
-  const cutoff = Math.max(0.03, filledCells[Math.min(keepCount - 1, filledCells.length - 1)].coverage)
+  const keepCount = clamp(cells.length, minCells, maxCells)
+  const cutoff = Math.max(COVERAGE_THRESHOLD, cells[Math.min(keepCount - 1, cells.length - 1)].coverage)
 
-  const keptCells = filledCells.filter((cell) => cell.coverage >= cutoff)
-  keptCells.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x))
+  const keptCells = cells
+    .filter((cell) => cell.coverage >= cutoff)
+    .sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x))
 
-  const minX = keptCells[0].x
-  const maxX = keptCells[keptCells.length - 1].x
+  const minX = keptCells.reduce((acc, cell) => Math.min(acc, cell.x), GRID_SIZE - 1)
+  const maxX = keptCells.reduce((acc, cell) => Math.max(acc, cell.x), 0)
   const minY = keptCells.reduce((acc, cell) => Math.min(acc, cell.y), GRID_SIZE - 1)
   const maxY = keptCells.reduce((acc, cell) => Math.max(acc, cell.y), 0)
-  const spanX = Math.max(1, maxX - minX)
-  const spanY = Math.max(1, maxY - minY)
+
+  const width = Math.max(1, maxX - minX + 1)
+  const height = Math.max(1, maxY - minY + 1)
+
+  const maxOffsetX = Math.max(0, GRID_SIZE - width)
+  const preferredOffsetX = Math.floor((GRID_SIZE - width) / 2)
+  const offsetX = Math.max(
+    Math.min(preferredOffsetX, maxOffsetX),
+    Math.min(HORIZONTAL_MARGIN_CELLS, maxOffsetX),
+  )
+
+  const verticalMarginCells = Math.floor(GRID_SIZE * VERTICAL_MARGIN_RATIO)
+  const maxOffsetY = Math.max(0, GRID_SIZE - height)
+  const preferredOffsetY = Math.floor((GRID_SIZE - height) / 2)
+  const offsetY = Math.max(
+    Math.min(preferredOffsetY, maxOffsetY),
+    Math.min(verticalMarginCells, maxOffsetY),
+  )
 
   mask.fill(0)
 
-  const verticalPadding = Math.floor(GRID_SIZE * VERTICAL_PADDING_RATIO)
-  const usableHeight = Math.max(2, GRID_SIZE - verticalPadding * 2)
-  const usableWidth = Math.max(2, GRID_SIZE - HORIZONTAL_PADDING_CELLS * 2)
-
   keptCells.forEach((cell) => {
-    const xRatio = spanX > 0 ? (cell.x - minX) / spanX : 0.5
-    const yRatio = spanY > 0 ? (cell.y - minY) / spanY : 0.5
-
-    const targetX = clamp(
-      Math.round(HORIZONTAL_PADDING_CELLS + xRatio * (usableWidth - 1)),
-      0,
-      GRID_SIZE - 1,
-    )
-    const targetY = clamp(
-      Math.round(verticalPadding + yRatio * (usableHeight - 1)),
-      0,
-      GRID_SIZE - 1,
-    )
-
+    const targetX = clamp(cell.x - minX + offsetX, 0, GRID_SIZE - 1)
+    const targetY = clamp(cell.y - minY + offsetY, 0, GRID_SIZE - 1)
     const cellIndex = targetY * GRID_SIZE + targetX
-    const normalizedCoverage = maxCoverage > 0 ? clamp((cell.coverage / maxCoverage) ** 0.85, 0, 1) : 0
+
+    const normalizedCoverage = maxCoverage > 0 ? clamp((cell.coverage / maxCoverage) * MAX_ALPHA_MULTIPLIER, 0, 1) : 0
 
     if (mask[cellIndex] >= normalizedCoverage) {
       return
     }
 
     const offset = cellIndex * 3
-    const [r, g, b] = sampleGradient(xRatio)
+    const ratio = width > 1 ? (cell.x - minX) / (width - 1) : 0.5
+    const [r, g, b] = sampleGradient(ratio)
     colors[offset] = r
     colors[offset + 1] = g
     colors[offset + 2] = b
@@ -274,29 +328,125 @@ const createTextData = (): TextData => {
       mask,
       colors,
       cellIndices,
-      toDataURL: () => {
-        const debugCanvas = document.createElement('canvas')
-        debugCanvas.width = GRID_SIZE
-        debugCanvas.height = GRID_SIZE
-        const debugCtx = debugCanvas.getContext('2d')
-        if (!debugCtx) {
-          return ''
+      sourceDataURL,
+      toDataURL: () => createMaskPreview(mask, colors),
+      showPreview: () => {
+        const maskDataURL = debug.toDataURL()
+        const sourceDataURL = debug.sourceDataURL
+        if (!maskDataURL) {
+          return
         }
-        const imageData = debugCtx.createImageData(GRID_SIZE, GRID_SIZE)
-        for (let i = 0; i < mask.length; i += 1) {
-          const value = mask[i]
-          const colorOffset = i * 4
-          const sampleOffset = i * 3
-          imageData.data[colorOffset] = colors[sampleOffset]
-          imageData.data[colorOffset + 1] = colors[sampleOffset + 1]
-          imageData.data[colorOffset + 2] = colors[sampleOffset + 2]
-          imageData.data[colorOffset + 3] = Math.round(clamp(value, 0, 1) * 255)
+        let container = document.getElementById('__visualcore-debug-preview') as HTMLDivElement | null
+        if (!container) {
+          container = document.createElement('div')
+          container.id = '__visualcore-debug-preview'
+          Object.assign(container.style, {
+            position: 'fixed',
+            top: '1rem',
+            right: '1rem',
+            padding: '0.5rem',
+            background: 'rgba(5, 6, 15, 0.85)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: '0.5rem',
+            zIndex: '2147483647',
+            pointerEvents: 'auto',
+            color: '#fff',
+            fontSize: '0.75rem',
+            fontFamily: 'monospace',
+            boxShadow: '0 12px 32px rgba(0,0,0,0.35)',
+          })
+          const close = document.createElement('button')
+          close.type = 'button'
+          close.textContent = '×'
+          Object.assign(close.style, {
+            position: 'absolute',
+            top: '0.15rem',
+            right: '0.3rem',
+            border: 'none',
+            background: 'transparent',
+            color: '#fff',
+            cursor: 'pointer',
+            fontSize: '0.85rem',
+          })
+          close.addEventListener('click', () => {
+            container?.remove()
+          })
+          container.append(close)
+          const title = document.createElement('div')
+          title.textContent = 'visualcore splash buffer'
+          Object.assign(title.style, {
+            marginBottom: '0.25rem',
+          })
+          container.append(title)
+
+          const maskLabel = document.createElement('div')
+          maskLabel.textContent = 'Sampled mask'
+          Object.assign(maskLabel.style, {
+            marginBottom: '0.15rem',
+          })
+          container.append(maskLabel)
+
+          const maskImg = document.createElement('img')
+          maskImg.dataset.type = 'mask'
+          Object.assign(maskImg.style, {
+            width: '128px',
+            height: '128px',
+            imageRendering: 'pixelated',
+            display: 'block',
+            marginBottom: '0.35rem',
+            border: '1px solid rgba(255,255,255,0.12)',
+          })
+          container.append(maskImg)
+
+          const sourceLabel = document.createElement('div')
+          sourceLabel.dataset.type = 'source-label'
+          sourceLabel.textContent = 'Canvas source'
+          Object.assign(sourceLabel.style, {
+            marginBottom: '0.15rem',
+            display: 'none',
+          })
+          container.append(sourceLabel)
+
+          const sourceImg = document.createElement('img')
+          sourceImg.dataset.type = 'source'
+          Object.assign(sourceImg.style, {
+            width: '128px',
+            height: '128px',
+            imageRendering: 'pixelated',
+            display: 'none',
+            border: '1px solid rgba(255,255,255,0.12)',
+          })
+          container.append(sourceImg)
+
+          document.body.append(container)
         }
-        debugCtx.putImageData(imageData, 0, 0)
-        return debugCanvas.toDataURL('image/png')
+
+        const maskImg = container.querySelector('img[data-type="mask"]') as HTMLImageElement | null
+        if (maskImg) {
+          maskImg.src = maskDataURL
+        }
+
+        const sourceImg = container.querySelector('img[data-type="source"]') as HTMLImageElement | null
+        const sourceLabel = container.querySelector('[data-type="source-label"]') as HTMLDivElement | null
+        if (sourceDataURL && sourceImg && sourceLabel) {
+          sourceImg.src = sourceDataURL
+          sourceImg.style.display = 'block'
+          sourceLabel.style.display = 'block'
+        } else if (sourceImg && sourceLabel) {
+          sourceImg.style.display = 'none'
+          sourceLabel.style.display = 'none'
+        }
       },
     }
     ;(window as any).__visualcoreDebug = debug
+
+    const isTestEnv = typeof globalThis !== 'undefined' && (globalThis as any).process?.env?.NODE_ENV === 'test'
+    const isProdEnv = typeof import.meta !== 'undefined' && (import.meta as any).env?.MODE === 'production'
+    const autoPreviewSetting = (window as any).__VISUALCORE_AUTO_PREVIEW
+    const shouldAutoPreview = !isTestEnv && !isProdEnv && (autoPreviewSetting === undefined ? true : Boolean(autoPreviewSetting))
+    if (shouldAutoPreview && typeof document !== 'undefined') {
+      debug.showPreview()
+    }
   }
 
   return {
@@ -308,6 +458,7 @@ const createTextData = (): TextData => {
 }
 
 const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: PixelGridProps) => {
+
 
   const textData = useMemo(createTextData, [])
 
