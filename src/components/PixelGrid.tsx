@@ -7,9 +7,10 @@ interface PixelGridProps {
   onScatterStart: () => void
   onScatterComplete: () => void
   scatterSignal: number
+  curlAmount?: number
 }
 
-const GRID_SIZE = 128
+const GRID_SIZE = 98
 const TEXT_ALPHA = 0.85
 const HIGHLIGHT_ALPHA = 0.96
 const DECAY_FACTOR = 0.965
@@ -46,25 +47,29 @@ const GLOBAL_EXPLOSION_GRAVITY = 0.22
 const GLOBAL_EXPLOSION_DRAG = 0.96
 const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
 const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
-const TEXT_REVEAL_DURATION_MS = 1000
+const TEXT_REVEAL_DURATION_MS = 3000
 const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 const AUTO_SCATTER_INTERVAL_MS =
   Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
-const SCATTER_PARTICLE_SPEED_MIN = 1
-const SCATTER_PARTICLE_SPEED_MAX = 2
+const SCATTER_PARTICLE_SPEED_MIN = .01
+const SCATTER_PARTICLE_SPEED_MAX = .5
 const SCATTER_PARTICLE_DRAG = 0.9
-const SCATTER_PARTICLE_INTENSITY_DECAY = 0.99
+const SCATTER_PARTICLE_INTENSITY_DECAY = 0.98
 const SCATTER_PARTICLE_MIN_INTENSITY = .4
 const SCATTER_PARTICLE_MAX_AGE_MS = 500
 const SCATTER_PARTICLE_MAX_COUNT = 800
 const SCATTER_PARTICLE_FRAME_MS = 1000 / 60
-const TRAIL_RELEASE_MAX_AGE_MS = 300
+const TRAIL_RELEASE_MAX_AGE_MS = 400
 const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
+const SCATTER_PARTICLE_CURL_DEFAULT = .25
+const CURL_NOISE_SCALE = 5
+const CURL_NOISE_EPSILON = 1
 
 
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
 
 const computeSweepReveal = (progress: number, ratio: number) => {
   if (progress <= 0) {
@@ -76,6 +81,24 @@ const computeSweepReveal = (progress: number, ratio: number) => {
 
   const tolerance = Math.max(TEXT_REVEAL_SMOOTHING, 0)
   return progress + tolerance >= ratio ? 1 : 0
+}
+
+const sampleNoise = (x: number, y: number, time: number) => {
+  const nx = x * CURL_NOISE_SCALE
+  const ny = y * CURL_NOISE_SCALE
+  const t = time * 0.0006
+  return (
+    Math.sin(nx * 12.9898 + ny * 78.233 + t * 19.19) +
+    Math.cos(nx * 6.153 + ny * 27.897 + t * 11.73)
+  )
+}
+
+const computeCurlNoise = (x: number, y: number, time: number) => {
+  const eps = CURL_NOISE_EPSILON
+  const sample = (sx: number, sy: number) => sampleNoise(sx, sy, time)
+  const dy = sample(x, y + eps) - sample(x, y - eps)
+  const dx = sample(x + eps, y) - sample(x - eps, y)
+  return { x: dy * 0.5, y: -dx * 0.5 }
 }
 
 function assertInvariant(condition: unknown, message: string): asserts condition {
@@ -608,7 +631,7 @@ const createTextData = (): TextData => {
   }
 }
 
-const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: PixelGridProps) => {
+const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal, curlAmount }: PixelGridProps) => {
 
 
   const textData = useMemo(createTextData, [])
@@ -653,10 +676,13 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const intensityAgeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const highlightActiveRef = useRef<number[]>([])
   const highlightActiveFlagsRef = useRef<Uint8Array>(new Uint8Array(GRID_SIZE * GRID_SIZE))
+  const curlAmountRef = useRef<number>(curlAmount ?? SCATTER_PARTICLE_CURL_DEFAULT)
+  const noiseTimeRef = useRef<number>(0)
   const frameRunningRef = useRef<boolean>(false)
   const framePendingRef = useRef<boolean>(false)
   const textRevealTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
   const particleSpawnInitRef = useRef(false)
+
   if (!particleSpawnInitRef.current) {
     lastParticleSpawnRef.current.fill(-Infinity)
     intensityAgeRef.current.fill(0)
@@ -664,6 +690,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
     highlightActiveRef.current.length = 0
     particleSpawnInitRef.current = true
   }
+
+  useEffect(() => {
+    curlAmountRef.current = typeof curlAmount === 'number' ? curlAmount : SCATTER_PARTICLE_CURL_DEFAULT
+  }, [curlAmount])
 
 
 
@@ -942,6 +972,13 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         particle.intensity *= decayStep
         particle.ageMs += delta * SCATTER_PARTICLE_FRAME_MS
 
+        const curlAmountValue = curlAmountRef.current
+        if (curlAmountValue > 0) {
+          const curl = computeCurlNoise(particle.x, particle.y, noiseTimeRef.current)
+          particle.vx += curl.x * curlAmountValue * delta
+          particle.vy += curl.y * curlAmountValue * delta
+        }
+
         if (
           particle.intensity <= SCATTER_PARTICLE_MIN_INTENSITY ||
           particle.ageMs >= SCATTER_PARTICLE_MAX_AGE_MS
@@ -1050,6 +1087,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       const frameDelta = Math.min(deltaMs / (1000 / 60), 2)
       lastFrameTimeRef.current = timestamp
       animationFrameRef.current = null
+      noiseTimeRef.current += deltaMs
 
       if (textRevealProgressRef.current < 1) {
         textRevealProgressRef.current = Math.min(
