@@ -3,6 +3,8 @@ import { createTextData } from './PixelGrid'
 
 const GRID_SIZE = 64
 
+const SCALE = 18
+
 const buildCanvasStub = () => {
   const canvas = {
     width: 0,
@@ -52,6 +54,65 @@ const buildCanvasStub = () => {
           }
         },
         getImageData: () => ({ data: buffer }),
+      } as unknown as CanvasRenderingContext2D
+
+      return ctx
+    },
+  }
+
+  return canvas as unknown as HTMLCanvasElement
+}
+
+interface CoverageCell {
+  cellX: number
+  cellY: number
+  value?: number
+}
+
+const buildCoverageCanvasStub = (coverage: CoverageCell[]) => {
+  const coverageMap = coverage.map((cell) => ({
+    ...cell,
+    value: typeof cell.value === 'number' ? cell.value : 1,
+  }))
+
+  const canvas = {
+    width: GRID_SIZE * SCALE,
+    height: GRID_SIZE * SCALE,
+    style: {} as CSSStyleDeclaration,
+    getContext: (contextId: string) => {
+      if (contextId !== '2d') {
+        return null
+      }
+
+      const width = canvas.width
+      const height = canvas.height
+      const buffer = new Uint8ClampedArray(width * height * 4)
+
+      const ctx = {
+        fillStyle: '#000',
+        textAlign: 'center',
+        textBaseline: 'middle',
+        font: '',
+        clearRect: () => {
+          buffer.fill(0)
+        },
+        fillRect: () => {},
+        fillText: () => {},
+        getImageData: () => {
+          buffer.fill(0)
+          coverageMap.forEach(({ cellX, cellY, value }) => {
+            for (let sy = cellY * SCALE; sy < (cellY + 1) * SCALE; sy += 1) {
+              for (let sx = cellX * SCALE; sx < (cellX + 1) * SCALE; sx += 1) {
+                if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
+                  continue
+                }
+                const index = (sy * width + sx) * 4 + 3
+                buffer[index] = Math.round(255 * value)
+              }
+            }
+          })
+          return { data: buffer }
+        },
       } as unknown as CanvasRenderingContext2D
 
       return ctx
@@ -136,6 +197,117 @@ describe('createTextData splash mask', () => {
     const firstColors = Array.from(first!.colors)
     const secondColors = Array.from(second!.colors)
     expect(secondColors).toEqual(firstColors)
+  })
+
+  test('maps offscreen canvas coverage into mask and colors', () => {
+    const coverage = [
+      { cellX: 10, cellY: 6, value: 1 },
+      { cellX: 30, cellY: 6, value: 0.5 },
+    ]
+
+    withCanvasStub(() => buildCoverageCanvasStub(coverage), () => {
+      const data = createTextData()
+      const positive = Array.from(data.mask)
+        .map((value, index) => ({ value, index }))
+        .filter((entry) => entry.value > 0)
+        .sort((a, b) => b.value - a.value)
+
+      expect(positive.length).toBeGreaterThanOrEqual(2)
+
+      const strongest = positive[0]
+      const nextStrongest = positive[1]
+      const strongestColor = data.colors.slice(strongest.index * 3, strongest.index * 3 + 3)
+      const nextColor = data.colors.slice(nextStrongest.index * 3, nextStrongest.index * 3 + 3)
+
+      expect(strongest.value).toBeGreaterThan(0.8)
+      expect(nextStrongest.value).toBeGreaterThan(0.3)
+      expect(nextStrongest.value).toBeLessThan(strongest.value)
+
+      const strongestX = strongest.index % GRID_SIZE
+      const nextX = nextStrongest.index % GRID_SIZE
+      expect(strongestX).toBeLessThan(nextX)
+
+      expect(strongestColor).not.toEqual(nextColor)
+      expect(strongestColor[2]).toBeGreaterThan(strongestColor[0])
+      expect(nextColor[1]).toBeGreaterThan(strongestColor[1])
+    })
+  })
+
+  test('positions rendered glyph within padded vertical band', () => {
+    withCanvasStub(buildCanvasStub, () => {
+      const { cellIndices, mask } = createTextData()
+      const indices = Array.from(cellIndices)
+      const ys = indices.map((index) => Math.floor(index / GRID_SIZE))
+      const minY = Math.min(...ys)
+      const maxY = Math.max(...ys)
+
+      expect(minY).toBeGreaterThanOrEqual(Math.floor(GRID_SIZE * 0.2))
+      expect(maxY).toBeLessThanOrEqual(Math.ceil(GRID_SIZE * 0.8))
+
+      const topRowCoverage = new Set(
+        indices
+          .filter((index) => Math.floor(index / GRID_SIZE) === minY)
+          .map((index) => mask[index]),
+      )
+      expect(topRowCoverage.size).toBeGreaterThan(0)
+    })
+  })
+
+  test('applies left-to-right gradient ordering', () => {
+    withCanvasStub(buildCanvasStub, () => {
+      const { cellIndices, colors } = createTextData()
+      const sorted = Array.from(cellIndices).sort((a, b) => (a % GRID_SIZE) - (b % GRID_SIZE))
+      const sampleLeft = colors.slice(sorted[0] * 3, sorted[0] * 3 + 3)
+      const sampleMid = colors.slice(sorted[Math.floor(sorted.length / 2)] * 3, sorted[Math.floor(sorted.length / 2)] * 3 + 3)
+      const sampleRight = colors.slice(sorted[sorted.length - 1] * 3, sorted[sorted.length - 1] * 3 + 3)
+
+      expect(sampleLeft[2]).toBeGreaterThan(sampleLeft[0])
+      expect(sampleMid[0]).toBeGreaterThan(sampleLeft[0])
+      expect(sampleRight[1]).toBeGreaterThan(sampleMid[1])
+    })
+  })
+
+  test('normalizes coverage into bounded range', () => {
+    withCanvasStub(buildCanvasStub, () => {
+      const { mask } = createTextData()
+      const positiveValues = Array.from(mask).filter((value) => value > 0)
+      const maxValue = Math.max(...positiveValues)
+      const minValue = Math.min(...positiveValues)
+      const averageValue = positiveValues.reduce((total, value) => total + value, 0) / positiveValues.length
+
+      expect(maxValue).toBeLessThanOrEqual(1)
+      expect(maxValue).toBeGreaterThan(0.9)
+      expect(minValue).toBeGreaterThan(0.2)
+      expect(averageValue).toBeGreaterThan(0.4)
+      expect(averageValue).toBeLessThanOrEqual(1)
+    })
+  })
+
+  test('preserves relative coverage ordering across sampled cells', () => {
+    const coverage = [
+      { cellX: 12, cellY: 10, value: 1 },
+      { cellX: 20, cellY: 10, value: 0.4 },
+      { cellX: 28, cellY: 10, value: 0.15 },
+    ]
+
+    withCanvasStub(() => buildCoverageCanvasStub(coverage), () => {
+      const { mask } = createTextData()
+      const positive = Array.from(mask)
+        .map((value, index) => ({ value, index }))
+        .filter((entry) => entry.value > 0)
+        .sort((a, b) => b.value - a.value)
+
+      expect(positive.length).toBeGreaterThanOrEqual(3)
+
+      const first = positive[0]
+      const second = positive[1]
+      const third = positive[2]
+
+      expect(first.value).toBeGreaterThan(second.value)
+      expect(second.value).toBeGreaterThan(third.value)
+      expect(first.value).toBeGreaterThan(0.8)
+      expect(third.value).toBeLessThan(0.4)
+    })
   })
 
   test('falls back when 2d context is unavailable', () => {

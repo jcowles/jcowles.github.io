@@ -31,114 +31,58 @@ const GRADIENT_STOPS: Array<{ stop: number; color: [number, number, number] }> =
   { stop: 1, color: [108, 201, 255] },
 ]
 
-const GLYPH_WIDTH = 6
-const GLYPH_HEIGHT = 8
-const LETTER_GAP = 2
+const CANVAS_SCALE = 18
+const HORIZONTAL_PADDING_CELLS = 2
+const VERTICAL_PADDING_RATIO = 0.35
+const MIN_CELLS_RATIO = 0.08
+const MAX_CELLS_RATIO = 0.28
 
-const FONT_MAP: Record<string, string[]> = {
-  v: [
-    '#....#',
-    '#....#',
-    '#....#',
-    '.#..#.',
-    '.#..#.',
-    '..##..',
-    '..##..',
-    '..##..',
-  ],
-  i: [
-    '.####.',
-    '..##..',
-    '..##..',
-    '..##..',
-    '..##..',
-    '..##..',
-    '..##..',
-    '.####.',
-  ],
-  s: [
-    '.####.',
-    '#....#',
-    '#.....',
-    '.####.',
-    '.....#',
-    '#....#',
-    '#....#',
-    '.####.',
-  ],
-  u: [
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '.####.',
-  ],
-  a: [
-    '.####.',
-    '#....#',
-    '#....#',
-    '#....#',
-    '.#####',
-    '#....#',
-    '#....#',
-    '#....#',
-  ],
-  l: [
-    '##....',
-    '##....',
-    '##....',
-    '##....',
-    '##....',
-    '##....',
-    '##....',
-    '######',
-  ],
-  c: [
-    '.####.',
-    '#....#',
-    '#.....',
-    '#.....',
-    '#.....',
-    '#.....',
-    '#....#',
-    '.####.',
-  ],
-  o: [
-    '.####.',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '#....#',
-    '.####.',
-  ],
-  r: [
-    '####..',
-    '#...#.',
-    '#...#.',
-    '####..',
-    '#..#..',
-    '#...#.',
-    '#....#',
-    '#....#',
-  ],
-  e: [
-    '.####.',
-    '#....#',
-    '#.....',
-    '#####.',
-    '#.....',
-    '#.....',
-    '#....#',
-    '.####.',
-  ],
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+function assertInvariant(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(`[PixelGrid] ${message}`)
+  }
 }
 
-const DEFAULT_GLYPH = ['......', '......', '......', '......', '......', '......', '......', '......']
+const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array): TextData => {
+  const mask = new Float32Array(totalCells)
+  const colors = new Float32Array(totalCells * 3)
+  const cellIndices: number[] = []
+
+  const minStripe = Math.floor(GRID_SIZE * 0.3)
+  const maxStripe = Math.ceil(GRID_SIZE * 0.7)
+
+  for (let y = 0; y < GRID_SIZE; y += 1) {
+    for (let x = 0; x < GRID_SIZE; x += 1) {
+      const cellIndex = y * GRID_SIZE + x
+      const offset = cellIndex * 3
+
+      if (y >= minStripe && y <= maxStripe) {
+        const ratio = x / Math.max(1, GRID_SIZE - 1)
+        const [r, g, b] = sampleGradient(ratio)
+        colors[offset] = r
+        colors[offset + 1] = g
+        colors[offset + 2] = b
+        mask[cellIndex] = 1
+        cellIndexLookup[cellIndex] = cellIndices.length
+        cellIndices.push(cellIndex)
+      } else {
+        colors[offset] = DEFAULT_COLOR[0]
+        colors[offset + 1] = DEFAULT_COLOR[1]
+        colors[offset + 2] = DEFAULT_COLOR[2]
+        mask[cellIndex] = 0
+      }
+    }
+  }
+
+  return {
+    mask,
+    colors,
+    cellIndices: Int32Array.from(cellIndices),
+    cellIndexLookup,
+  }
+}
 
 interface TextData {
   mask: Float32Array
@@ -194,77 +138,118 @@ const createTextData = (): TextData => {
   const colors = new Float32Array(totalCells * 3)
   const cellIndices: number[] = []
 
-  const glyphs = TEXT_CONTENT.split('').map((char) => FONT_MAP[char] ?? DEFAULT_GLYPH)
-  const patternWidth = glyphs.length * GLYPH_WIDTH + (glyphs.length - 1) * LETTER_GAP
-  const pattern: boolean[][] = Array.from({ length: GLYPH_HEIGHT }, () =>
-    Array(patternWidth).fill(false),
-  )
+  if (typeof document === 'undefined') {
+    return createFallbackTextData(totalCells, cellIndexLookup)
+  }
 
-  let cursor = 0
-  glyphs.forEach((glyph) => {
-    glyph.forEach((row, rowIndex) => {
-      for (let col = 0; col < GLYPH_WIDTH; col += 1) {
-        if (row[col] === '#') {
-          pattern[rowIndex][cursor + col] = true
+  const canvas = document.createElement('canvas')
+  canvas.width = GRID_SIZE * CANVAS_SCALE
+  canvas.height = GRID_SIZE * CANVAS_SCALE
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx || typeof ctx.fillText !== 'function' || typeof ctx.getImageData !== 'function') {
+    return createFallbackTextData(totalCells, cellIndexLookup)
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `700 ${Math.floor(canvas.height * 0.58)}px "Inter", "Poppins", sans-serif`
+  ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  const cells: Array<{ cellIndex: number; coverage: number; x: number; y: number }> = []
+  let maxCoverage = 0
+
+  for (let y = 0; y < GRID_SIZE; y += 1) {
+    for (let x = 0; x < GRID_SIZE; x += 1) {
+      let alphaSum = 0
+      for (let sy = 0; sy < CANVAS_SCALE; sy += 1) {
+        for (let sx = 0; sx < CANVAS_SCALE; sx += 1) {
+          const pixelX = x * CANVAS_SCALE + sx
+          const pixelY = y * CANVAS_SCALE + sy
+          const index = (pixelY * canvas.width + pixelX) * 4 + 3
+          alphaSum += imageData[index]
         }
       }
-    })
-    cursor += GLYPH_WIDTH + LETTER_GAP
-  })
 
-  const horizontalPadding = 2
-  const columnBoundaries = Array.from({ length: patternWidth + 1 }, (_, index) =>
-    Math.round(
-      horizontalPadding +
-        (index * Math.max(1, GRID_SIZE - horizontalPadding * 2)) / Math.max(1, patternWidth),
-    ),
-  )
-  columnBoundaries[0] = Math.max(0, horizontalPadding)
-  columnBoundaries[columnBoundaries.length - 1] = Math.min(GRID_SIZE, GRID_SIZE - horizontalPadding)
-
-  const verticalPadding = Math.floor(GRID_SIZE * 0.45)
-  const usableHeight = Math.max(2, GRID_SIZE - verticalPadding * 2)
-  const rowBoundaries = Array.from({ length: GLYPH_HEIGHT + 1 }, (_, index) =>
-    Math.round(verticalPadding + (index * usableHeight) / GLYPH_HEIGHT),
-  )
-  rowBoundaries[0] = Math.max(0, verticalPadding)
-  rowBoundaries[rowBoundaries.length - 1] = Math.min(GRID_SIZE, GRID_SIZE - verticalPadding)
-
-  for (let row = 0; row < GLYPH_HEIGHT; row += 1) {
-    const yStart = rowBoundaries[row]
-    const yEnd = Math.max(yStart + 1, Math.min(GRID_SIZE, rowBoundaries[row + 1]))
-
-    for (let col = 0; col < patternWidth; col += 1) {
-      if (!pattern[row][col]) {
-        continue
+      const coverage = alphaSum / (CANVAS_SCALE * CANVAS_SCALE * 255)
+      if (coverage > 0) {
+        maxCoverage = Math.max(maxCoverage, coverage)
       }
 
-      const xStart = columnBoundaries[col]
-      const xEnd = Math.max(xStart + 1, Math.min(GRID_SIZE, columnBoundaries[col + 1]))
-
-      for (let y = yStart; y < yEnd; y += 1) {
-        for (let x = xStart; x < xEnd; x += 1) {
-          const cellIndex = y * GRID_SIZE + x
-          if (mask[cellIndex] === 1) {
-            continue
-          }
-
-          const offset = cellIndex * 3
-          const ratio = x / Math.max(1, GRID_SIZE - 1)
-          const [r, g, b] = sampleGradient(ratio)
-          colors[offset] = r
-          colors[offset + 1] = g
-          colors[offset + 2] = b
-          mask[cellIndex] = 1
-          cellIndexLookup[cellIndex] = cellIndices.length
-          cellIndices.push(cellIndex)
-        }
-      }
+      cells.push({ cellIndex: y * GRID_SIZE + x, coverage, x, y })
     }
   }
 
+  const filledCells = cells.filter((cell) => cell.coverage > 0)
+  if (filledCells.length === 0) {
+    return createFallbackTextData(totalCells, cellIndexLookup)
+  }
+
+  filledCells.sort((a, b) => b.coverage - a.coverage)
+
+  const minCells = Math.floor(GRID_SIZE * GRID_SIZE * MIN_CELLS_RATIO)
+  const maxCells = Math.floor(GRID_SIZE * GRID_SIZE * MAX_CELLS_RATIO)
+  const keepCount = clamp(filledCells.length, minCells, maxCells)
+  const cutoff = Math.max(0.03, filledCells[Math.min(keepCount - 1, filledCells.length - 1)].coverage)
+
+  const keptCells = filledCells.filter((cell) => cell.coverage >= cutoff)
+  keptCells.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x))
+
+  const minX = keptCells[0].x
+  const maxX = keptCells[keptCells.length - 1].x
+  const minY = keptCells.reduce((acc, cell) => Math.min(acc, cell.y), GRID_SIZE - 1)
+  const maxY = keptCells.reduce((acc, cell) => Math.max(acc, cell.y), 0)
+  const spanX = Math.max(1, maxX - minX)
+  const spanY = Math.max(1, maxY - minY)
+
+  mask.fill(0)
+
+  const verticalPadding = Math.floor(GRID_SIZE * VERTICAL_PADDING_RATIO)
+  const usableHeight = Math.max(2, GRID_SIZE - verticalPadding * 2)
+  const usableWidth = Math.max(2, GRID_SIZE - HORIZONTAL_PADDING_CELLS * 2)
+
+  keptCells.forEach((cell) => {
+    const xRatio = spanX > 0 ? (cell.x - minX) / spanX : 0.5
+    const yRatio = spanY > 0 ? (cell.y - minY) / spanY : 0.5
+
+    const targetX = clamp(
+      Math.round(HORIZONTAL_PADDING_CELLS + xRatio * (usableWidth - 1)),
+      0,
+      GRID_SIZE - 1,
+    )
+    const targetY = clamp(
+      Math.round(verticalPadding + yRatio * (usableHeight - 1)),
+      0,
+      GRID_SIZE - 1,
+    )
+
+    const cellIndex = targetY * GRID_SIZE + targetX
+    const normalizedCoverage = maxCoverage > 0 ? clamp((cell.coverage / maxCoverage) ** 0.85, 0, 1) : 0
+
+    if (mask[cellIndex] >= normalizedCoverage) {
+      return
+    }
+
+    const offset = cellIndex * 3
+    const [r, g, b] = sampleGradient(xRatio)
+    colors[offset] = r
+    colors[offset + 1] = g
+    colors[offset + 2] = b
+    mask[cellIndex] = normalizedCoverage
+
+    if (cellIndexLookup[cellIndex] === -1) {
+      cellIndexLookup[cellIndex] = cellIndices.length
+      cellIndices.push(cellIndex)
+    }
+  })
+
   for (let cellIndex = 0; cellIndex < totalCells; cellIndex += 1) {
-    if (mask[cellIndex] === 1) {
+    if (cellIndexLookup[cellIndex] !== -1) {
       continue
     }
     const offset = cellIndex * 3
@@ -272,6 +257,46 @@ const createTextData = (): TextData => {
     colors[offset + 1] = DEFAULT_COLOR[1]
     colors[offset + 2] = DEFAULT_COLOR[2]
     mask[cellIndex] = 0
+  }
+
+  assertInvariant(cellIndices.length > 0, 'text sampling produced empty mask')
+
+  const maskSamples = cellIndices.map((index) => mask[index])
+  const maxValue = Math.max(...maskSamples)
+  const minValue = Math.min(...maskSamples)
+
+  assertInvariant(Number.isFinite(maxValue) && maxValue > 0, 'mask is missing positive coverage values')
+  assertInvariant(maxValue <= 1.01, 'mask coverage exceeds normalized range')
+  assertInvariant(minValue >= 0, 'mask coverage contains negative values')
+
+  if (typeof window !== 'undefined') {
+    const debug = {
+      mask,
+      colors,
+      cellIndices,
+      toDataURL: () => {
+        const debugCanvas = document.createElement('canvas')
+        debugCanvas.width = GRID_SIZE
+        debugCanvas.height = GRID_SIZE
+        const debugCtx = debugCanvas.getContext('2d')
+        if (!debugCtx) {
+          return ''
+        }
+        const imageData = debugCtx.createImageData(GRID_SIZE, GRID_SIZE)
+        for (let i = 0; i < mask.length; i += 1) {
+          const value = mask[i]
+          const colorOffset = i * 4
+          const sampleOffset = i * 3
+          imageData.data[colorOffset] = colors[sampleOffset]
+          imageData.data[colorOffset + 1] = colors[sampleOffset + 1]
+          imageData.data[colorOffset + 2] = colors[sampleOffset + 2]
+          imageData.data[colorOffset + 3] = Math.round(clamp(value, 0, 1) * 255)
+        }
+        debugCtx.putImageData(imageData, 0, 0)
+        return debugCanvas.toDataURL('image/png')
+      },
+    }
+    ;(window as any).__visualcoreDebug = debug
   }
 
   return {
