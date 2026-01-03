@@ -51,14 +51,26 @@ const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 const AUTO_SCATTER_INTERVAL_MS =
   Math.max(SCATTER_DURATION + EXPLOSION_DURATION_MS, TEXT_REVEAL_DURATION_MS) + 600
-const SCATTER_PARTICLE_SPEED_MIN = 6
-const SCATTER_PARTICLE_SPEED_MAX = 18
-const SCATTER_PARTICLE_DRAG = 0.94
-const SCATTER_PARTICLE_INTENSITY_DECAY = 0.92
-const SCATTER_PARTICLE_MIN_INTENSITY = 0.035
+const SCATTER_PARTICLE_SPEED_MIN = 1
+const SCATTER_PARTICLE_SPEED_MAX = 2
+const SCATTER_PARTICLE_DRAG = 0.99
+const SCATTER_PARTICLE_INTENSITY_DECAY = 0.9
+const SCATTER_PARTICLE_MIN_INTENSITY = 0.0015
 const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const computeSweepReveal = (progress: number, ratio: number) => {
+  if (progress <= 0) {
+    return 0
+  }
+  if (progress >= 1) {
+    return 1
+  }
+
+  const tolerance = Math.max(TEXT_REVEAL_SMOOTHING, 0)
+  return progress + tolerance >= ratio ? 1 : 0
+}
 
 function assertInvariant(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -626,7 +638,12 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
   const pendingForcedScatterRef = useRef<boolean>(false)
   const completeScatterRef = useRef<() => void>(() => {})
   const scatterParticlesRef = useRef<ScatterParticle[]>([])
+  const scatterCellRef = useRef<
+    (cellIndex: number, options?: { intensity?: number; allowDuplicate?: boolean }) => void
+  >(() => {})
+  const pendingTextScatterRef = useRef<number[]>([])
   const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
+  const textRevealTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
   const particleSpawnInitRef = useRef(false)
   if (!particleSpawnInitRef.current) {
     lastParticleSpawnRef.current.fill(-Infinity)
@@ -735,7 +752,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const coverage = mask[cellIndex]
         const intensity = intensities[cellIndex]
         const revealRatio = revealRatios[cellIndex]
-        const revealWeight = clamp((revealProgress - revealRatio) / TEXT_REVEAL_SMOOTHING, 0, 1)
+        const revealWeight = computeSweepReveal(revealProgress, revealRatio)
 
         if (coverage <= 0 && intensity <= MIN_VISIBLE_INTENSITY && revealWeight <= 0) {
           continue
@@ -746,7 +763,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const baseG = colors[colorOffset + 1]
         const baseB = colors[colorOffset + 2]
 
-        const normalizedCoverage = coverage > 0 ? Math.max(coverage, 0.5 * Math.max(revealWeight, 0.2)) : 0
+        const normalizedCoverage = coverage > 0 ? Math.max(coverage, revealWeight) : 0
         const hasTextFill = normalizedCoverage > 0 && revealWeight > 0
         const baseVisibility = hasTextFill ? phaseVisibility * revealWeight : 0
         const baseAlpha = hasTextFill ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
@@ -892,13 +909,21 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       let hasEnergy = false
 
       if (!suppressIntroGlow) {
+        const revealTriggered = textRevealTriggeredRef.current
+        const pendingTextScatter = pendingTextScatterRef.current
         for (let index = 0; index < textCells.length; index += 1) {
           if (flags[index] !== 0) {
             continue
           }
           const cellIndex = textCells[index]
           const revealRatio = revealRatios[cellIndex]
-          const revealWeight = clamp((revealProgress - revealRatio) / TEXT_REVEAL_SMOOTHING, 0, 1)
+          const revealWeight = computeSweepReveal(revealProgress, revealRatio)
+
+          if (revealWeight >= 1 && revealTriggered[index] === 0) {
+            revealTriggered[index] = 1
+            pendingTextScatter.push(cellIndex)
+          }
+
           if (revealWeight <= 0) {
             intensities[cellIndex] = Math.max(0, intensities[cellIndex] * decayStep)
             continue
@@ -950,6 +975,15 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         suppressIntroGlow: explosionHasEnergy,
         delta: frameDelta,
       })
+
+      const pendingScatter = pendingTextScatterRef.current
+      if (pendingScatter.length > 0) {
+        const items = pendingScatter.splice(0, pendingScatter.length)
+        for (let index = 0; index < items.length; index += 1) {
+          scatterCellRef.current(items[index])
+        }
+      }
+
       const particlesHaveEnergy = updateScatterParticles(frameDelta)
       draw()
 
@@ -1216,6 +1250,7 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
 
         if (shouldSpawn && flags[textIndex] === 0) {
           flags[textIndex] = 1
+          textRevealTriggeredRef.current[textIndex] = 1
           remainingTextCellsRef.current -= 1
           ensureScatterCompletionGuard()
 
@@ -1250,6 +1285,10 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       textData.cellIndexLookup,
     ],
   )
+
+  useEffect(() => {
+    scatterCellRef.current = scatterCell
+  }, [scatterCell])
 
   const handlePointerActivation = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
@@ -1341,6 +1380,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       scatterStartedRef.current = false
       scatterCompleteRef.current = false
       scatterParticlesRef.current = []
+      pendingTextScatterRef.current.length = 0
+      textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
 
@@ -1348,14 +1389,6 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       clearScatterTimers()
       clearExplosionTimers()
       clearRippleTimers()
-
-      indices.forEach((cellIndex, order) => {
-        const delay = (order / indices.length) * 240
-        const timer = window.setTimeout(() => {
-          scatterCell(cellIndex)
-        }, delay)
-        scatterTimersRef.current.push(timer)
-      })
 
       scheduleFrame(true)
     },
@@ -1482,6 +1515,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       globalExplosionActiveRef.current = false
       globalExplosionParticlesRef.current = []
       scatterParticlesRef.current = []
+      pendingTextScatterRef.current.length = 0
+      textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       lastFrameTimeRef.current = null
@@ -1512,6 +1547,8 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
       scatterStartedRef.current = false
       scatterCompleteRef.current = false
       scatterParticlesRef.current = []
+      pendingTextScatterRef.current.length = 0
+      textRevealTriggeredRef.current.fill(0)
       lastParticleSpawnRef.current.fill(-Infinity)
       intensitiesRef.current.fill(0)
       clearScatterTimers()
