@@ -16,8 +16,8 @@ const DECAY_FACTOR = 0.965
 const MIN_VISIBLE_INTENSITY = 0.001
 const MIN_RIPPLE_INTENSITY = 0.06
 const BACKGROUND_COLOR = '#082c4a'
-const SCATTER_DURATION = 900
-const SCATTER_STEPS = 7
+const SCATTER_DURATION = 3000
+const SCATTER_STEPS =20
 const RIPPLE_STEP_DELAY_MS = 22
 const EXPLOSION_RADIUS = 100
 const EXPLOSION_DURATION_MS = 380
@@ -48,7 +48,7 @@ const GLOBAL_EXPLOSION_DRAG = 0.96
 const GLOBAL_EXPLOSION_INTENSITY_DECAY = 0.92
 const GLOBAL_EXPLOSION_INTERACTIVE_DELAY_MS = 3200
 const AUTO_SCATTER_INTERVAL_MS = SCATTER_DURATION + EXPLOSION_DURATION_MS + 600
-const TEXT_REVEAL_DURATION_MS = 600
+const TEXT_REVEAL_DURATION_MS = 3000
 const TEXT_REVEAL_SMOOTHING = 0.08
 const HIGHLIGHT_BLEND = 0.5
 
@@ -419,11 +419,14 @@ const createTextData = (): TextData => {
       continue
     }
     const offset = cellIndex * 3
-    colors[offset] = DEFAULT_COLOR[0]
-    colors[offset + 1] = DEFAULT_COLOR[1]
-    colors[offset + 2] = DEFAULT_COLOR[2]
+    const x = cellIndex % GRID_SIZE
+    const ratio = x / Math.max(1, GRID_SIZE - 1)
+    const [r, g, b] = sampleGradient(ratio)
+    colors[offset] = r
+    colors[offset + 1] = g
+    colors[offset + 2] = b
     mask[cellIndex] = 0
-    revealRatios[cellIndex] = 1
+    revealRatios[cellIndex] = ratio
   }
 
   assertInvariant(cellIndices.length > 0, 'text sampling produced empty mask')
@@ -705,19 +708,21 @@ const PixelGrid = ({ phase, onScatterStart, onScatterComplete, scatterSignal }: 
         const baseG = colors[colorOffset + 1]
         const baseB = colors[colorOffset + 2]
 
-        const normalizedCoverage = coverage > 0 ? Math.max(coverage, 0.45 * Math.max(revealWeight, 0.25)) : 0
-        const baseVisibility = phaseVisibility * revealWeight
-        const baseAlpha = normalizedCoverage > 0 ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
-        const highlightAlpha = intensity * HIGHLIGHT_ALPHA * Math.max(revealWeight, baseVisibility * 0.6)
+        const normalizedCoverage = coverage > 0 ? Math.max(coverage, 0.5 * Math.max(revealWeight, 0.2)) : 0
+        const hasTextFill = normalizedCoverage > 0 && revealWeight > 0
+        const baseVisibility = hasTextFill ? phaseVisibility * revealWeight : 0
+        const baseAlpha = hasTextFill ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
+
+        const highlightAlpha = intensity > 0 ? intensity * HIGHLIGHT_ALPHA : 0
         const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
         if (finalAlpha <= 0) {
           continue
         }
 
-        const highlightMix = Math.min(1, intensity * HIGHLIGHT_BLEND * Math.max(revealWeight, 0.35))
-        const r = Math.round(baseR + (255 - baseR) * highlightMix)
-        const g = Math.round(baseG + (255 - baseG) * highlightMix)
-        const b = Math.round(baseB + (255 - baseB) * highlightMix)
+        const highlightStrength = Math.min(1, intensity * HIGHLIGHT_BLEND)
+        const r = Math.round(baseR + (255 - baseR) * highlightStrength)
+        const g = Math.round(baseG + (255 - baseG) * highlightStrength)
+        const b = Math.round(baseB + (255 - baseB) * highlightStrength)
 
         ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha})`
         ctx.fillRect(offsetX + x * cellSize, offsetY + y * cellSize, cellSize, cellSize)
