@@ -1,64 +1,64 @@
-import type { CSSProperties, FC } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import PixelGrid from './components/PixelGrid'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import PixelGrid, { type Phase } from './components/PixelGrid'
 
-const INTRO_DURATION = 5000
-const TEXT = 'visual core'
+const TEXT = 'visualcore'
+const INTRO_DURATION_MS = 2400
+const TRANSITION_DURATION_MS = 700
 
-type Phase = 'intro' | 'transition' | 'grid'
-
-interface CharacterConfig {
-  char: string
-  direction: 1 | -1
-  duration: number
-  delay: number
-}
-
-const App: FC = () => {
+const App = () => {
   const [phase, setPhase] = useState<Phase>('intro')
+  const [scatterSignal, setScatterSignal] = useState(0)
+  const introTimerRef = useRef<number | null>(null)
+  const transitionTimerRef = useRef<number | null>(null)
 
-  const characters = useMemo<CharacterConfig[]>(() => {
-    return Array.from(TEXT).map((char, index) => ({
-      char,
-      direction: index % 2 === 0 ? 1 : -1,
-      duration: 650 + (index % 5) * 140,
-      delay: index * 45,
-    }))
+  const clearIntroTimer = useCallback(() => {
+    if (introTimerRef.current !== null) {
+      window.clearTimeout(introTimerRef.current)
+      introTimerRef.current = null
+    }
   }, [])
 
-  const longestCharacterDuration = useMemo(() => {
-    return characters.reduce((max, character) => {
-      return Math.max(max, character.duration + character.delay)
-    }, 0)
-  }, [characters])
-
-  const triggerTransition = useCallback(() => {
-    setPhase((current) => (current === 'intro' ? 'transition' : current))
+  const clearTransitionTimer = useCallback(() => {
+    if (transitionTimerRef.current !== null) {
+      window.clearTimeout(transitionTimerRef.current)
+      transitionTimerRef.current = null
+    }
   }, [])
 
+  const triggerScatterAll = useCallback(() => {
+    setScatterSignal((value) => value + 1)
+  }, [])
+
+  const handleScatterStart = useCallback(() => {
+    setPhase((current) => {
+      if (current !== 'intro') {
+        return current
+      }
+      clearTransitionTimer()
+      transitionTimerRef.current = window.setTimeout(() => {
+        setPhase('grid')
+        transitionTimerRef.current = null
+      }, TRANSITION_DURATION_MS)
+      return 'transition'
+    })
+  }, [clearTransitionTimer])
+
+  const handleScatterComplete = useCallback(() => {
+    clearTransitionTimer()
+    setPhase('grid')
+  }, [clearTransitionTimer])
+
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      triggerTransition()
-    }, INTRO_DURATION)
+    introTimerRef.current = window.setTimeout(() => {
+      triggerScatterAll()
+      introTimerRef.current = null
+    }, INTRO_DURATION_MS)
 
     return () => {
-      window.clearTimeout(timer)
+      clearIntroTimer()
+      clearTransitionTimer()
     }
-  }, [triggerTransition])
-
-  useEffect(() => {
-    if (phase !== 'transition') {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      setPhase('grid')
-    }, Math.ceil(longestCharacterDuration) + 200)
-
-    return () => {
-      window.clearTimeout(timer)
-    }
-  }, [longestCharacterDuration, phase])
+  }, [clearIntroTimer, clearTransitionTimer, triggerScatterAll])
 
   useEffect(() => {
     if (phase !== 'intro') {
@@ -68,68 +68,41 @@ const App: FC = () => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === ' ' || event.key.toLowerCase() === 'enter') {
         event.preventDefault()
-        triggerTransition()
+        clearIntroTimer()
+        triggerScatterAll()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [phase, triggerTransition])
+  }, [clearIntroTimer, phase, triggerScatterAll])
 
-  const gridActive = phase !== 'intro'
-  const hideText = phase === 'grid'
+  const handlePointerInteraction = useCallback(() => {
+    if (phase !== 'intro') {
+      return
+    }
+    clearIntroTimer()
+    triggerScatterAll()
+  }, [clearIntroTimer, phase, triggerScatterAll])
 
   return (
     <div
       data-testid="app-root"
-      className="relative flex h-screen w-screen select-none items-center justify-center overflow-hidden bg-[#05060f] text-white"
-      onPointerDown={triggerTransition}
+      className="relative flex h-screen w-screen select-none items-center justify-center overflow-hidden bg-[#082c4a] text-white"
+      onPointerDown={handlePointerInteraction}
     >
-      <div
-        data-testid="pixel-grid"
-        className={`absolute inset-0 transition-opacity duration-[1400ms] ${
-          gridActive ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        <PixelGrid active={gridActive} />
+      <div data-testid="pixel-grid" data-phase={phase} className="absolute inset-0">
+        <PixelGrid
+          phase={phase}
+          onScatterStart={handleScatterStart}
+          onScatterComplete={handleScatterComplete}
+          scatterSignal={scatterSignal}
+        />
       </div>
 
-      <div
-        data-testid="intro-text"
-        className={`relative z-10 flex items-center justify-center px-6 text-center font-display uppercase tracking-[0.55em] text-white/90 transition-opacity duration-700 ${
-          hideText ? 'pointer-events-none opacity-0 delay-700' : 'opacity-100'
-        }`}
-        style={headingStyle}
-      >
-        <div className="flex flex-wrap items-center justify-center gap-[0.08em]" aria-hidden>
-          {characters.map((character, index) => {
-            const style: CSSProperties = {
-              transition: `transform ${character.duration}ms cubic-bezier(0.25, 1, 0.5, 1), opacity ${character.duration}ms ease, filter ${character.duration}ms ease`,
-              transitionDelay: `${character.delay}ms`,
-              transform:
-                phase === 'intro'
-                  ? 'translateY(0%)'
-                  : `translateY(${character.direction * 120}%) scale(${phase === 'transition' ? 1.05 : 1})`,
-              opacity: phase === 'intro' ? 1 : 0,
-              filter: phase === 'intro' ? 'blur(0px)' : 'blur(8px)',
-            }
-
-            return (
-              <span key={`${character.char}-${index}`} className="inline-block" style={style}>
-                {character.char === ' ' ? '\u00A0' : character.char}
-              </span>
-            )
-          })}
-        </div>
-        <span className="sr-only">{TEXT}</span>
-      </div>
+      <span className="sr-only">{TEXT}</span>
     </div>
   )
-}
-
-const headingStyle: CSSProperties = {
-  fontSize: 'clamp(3rem, 14vw, 12rem)',
-  letterSpacing: '0.6em',
 }
 
 export default App

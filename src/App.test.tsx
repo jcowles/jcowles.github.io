@@ -2,37 +2,87 @@ import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+
+const renderSpy = vi.fn()
+
+vi.mock('./components/PixelGrid', () => {
+  const MockPixelGrid = (props: any) => {
+    renderSpy(props)
+    return <div data-testid="mock-pixel-grid" />
+  }
+
+  return { default: MockPixelGrid }
+})
+
 import App from './App'
+
+const noop = () => {}
 
 afterEach(() => {
   vi.useRealTimers()
+  renderSpy.mockReset()
 })
 
-describe('App splash experience', () => {
-  test('renders splash text on load', () => {
-    render(<App />)
-
-    expect(screen.getByText(/visual core/i)).toBeInTheDocument()
-    expect(screen.getByTestId('pixel-grid')).toHaveClass('pointer-events-none', { exact: false })
-  })
-
-  test('activates pixel grid after skipping intro', async () => {
+describe('App splash experience with intro overlay', () => {
+  test('renders intro overlay and passes intro phase to grid', () => {
     vi.useFakeTimers()
     render(<App />)
 
-    const root = screen.getByTestId('app-root')
-    const grid = screen.getByTestId('pixel-grid')
-    const text = screen.getByTestId('intro-text')
+    expect(screen.getByText(/visualcore/i)).toBeInTheDocument()
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'intro')
+    expect(renderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'intro', scatterSignal: 0 }),
+    )
+  })
 
-    expect(grid).toHaveClass('pointer-events-none', { exact: false })
+  test('transitions to grid after user interaction', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+
+    const pixelGrid = screen.getByTestId('pixel-grid')
+    const root = screen.getByTestId('app-root')
 
     fireEvent.pointerDown(root)
-    expect(grid).toHaveClass('pointer-events-auto', { exact: false })
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000)
+    const latestCall = renderSpy.mock.calls[renderSpy.mock.calls.length - 1]
+    const latestProps = latestCall?.[0]
+    expect(latestProps?.scatterSignal).toBe(1)
+    expect(pixelGrid).toHaveAttribute('data-phase', 'intro')
+
+    act(() => {
+      latestProps?.onScatterStart()
     })
 
-    expect(text).toHaveClass('opacity-0', { exact: false })
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'transition')
+
+    act(() => {
+      latestProps?.onScatterComplete()
+    })
+
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'grid')
+  })
+
+  test('auto transitions after intro duration', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+
+    await act(async () => {
+      vi.advanceTimersByTime(2400)
+    })
+
+    const autoCall = renderSpy.mock.calls[renderSpy.mock.calls.length - 1]
+    const latestProps = autoCall?.[0]
+    expect(latestProps?.scatterSignal).toBe(1)
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'intro')
+
+    act(() => {
+      latestProps?.onScatterStart()
+    })
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'transition')
+
+    act(() => {
+      latestProps?.onScatterComplete()
+    })
+    expect(screen.getByTestId('pixel-grid')).toHaveAttribute('data-phase', 'grid')
   })
 })
