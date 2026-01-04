@@ -1,7 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
-import { createTextData, downsampleCanvasCoverage } from './pixelGridCore'
+import { GRID_SIZE, createTextData, downsampleCanvasCoverage } from './pixelGridCore'
 
-const GRID_SIZE = 64
 const SCALE = 18
 
 const buildCanvasStub = () => {
@@ -66,6 +65,7 @@ interface CoverageCell {
   cellX: number
   cellY: number
   value?: number
+  color?: [number, number, number]
 }
 
 const buildCoverageCanvasStub = (coverage: CoverageCell[]) => {
@@ -99,15 +99,27 @@ const buildCoverageCanvasStub = (coverage: CoverageCell[]) => {
         fillText: () => {},
         getImageData: () => {
           buffer.fill(0)
-          coverageMap.forEach(({ cellX, cellY, value }) => {
-            for (let sy = cellY * SCALE; sy < (cellY + 1) * SCALE; sy += 1) {
-              for (let sx = cellX * SCALE; sx < (cellX + 1) * SCALE; sx += 1) {
-                if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
-                  continue
-                }
-                const index = (sy * width + sx) * 4 + 3
-                buffer[index] = Math.round(255 * value)
+          coverageMap.forEach(({ cellX, cellY, value, color }) => {
+            const normalized = Math.max(0, Math.min(1, value ?? 0))
+            const [r, g, b] = color ?? [255, 255, 255]
+            const totalSamples = SCALE * SCALE
+            const samplesToFill = Math.max(0, Math.min(totalSamples, Math.round(totalSamples * normalized)))
+            const startX = cellX * SCALE
+            const startY = cellY * SCALE
+
+            for (let sampleIndex = 0; sampleIndex < samplesToFill; sampleIndex += 1) {
+              const localX = sampleIndex % SCALE
+              const localY = Math.floor(sampleIndex / SCALE)
+              const sx = startX + localX
+              const sy = startY + localY
+              if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
+                continue
               }
+              const baseIndex = (sy * width + sx) * 4
+              buffer[baseIndex] = r
+              buffer[baseIndex + 1] = g
+              buffer[baseIndex + 2] = b
+              buffer[baseIndex + 3] = 255
             }
           })
           return { data: buffer }
@@ -129,23 +141,28 @@ describe('downsampleCanvasCoverage', () => {
     const height = gridSize * scale
     const imageData = new Uint8ClampedArray(width * height * 4)
 
-    const fillCell = (cellX: number, cellY: number, intensity: number) => {
-      for (let sy = 0; sy < scale; sy += 1) {
+    const fillCellByCoverage = (cellX: number, cellY: number, desiredCoverage: number) => {
+      const totalSamples = scale * scale
+      const samplesToFill = Math.max(0, Math.min(totalSamples, Math.round(totalSamples * desiredCoverage)))
+
+      for (let sampleIndex = 0; sampleIndex < samplesToFill; sampleIndex += 1) {
+        const sx = sampleIndex % scale
+        const sy = Math.floor(sampleIndex / scale)
+        const pixelX = cellX * scale + sx
         const pixelY = cellY * scale + sy
-        for (let sx = 0; sx < scale; sx += 1) {
-          const pixelX = cellX * scale + sx
-          const index = (pixelY * width + pixelX) * 4
-          imageData[index] = intensity
-          imageData[index + 1] = intensity
-          imageData[index + 2] = intensity
-          imageData[index + 3] = 255
-        }
+        const index = (pixelY * width + pixelX) * 4
+        imageData[index] = 255
+        imageData[index + 1] = 255
+        imageData[index + 2] = 255
+        imageData[index + 3] = 255
       }
+
+      return samplesToFill / totalSamples
     }
 
-    fillCell(0, 0, 255)
-    fillCell(1, 0, 128)
-    fillCell(2, 0, 64)
+    const fullCoverage = fillCellByCoverage(0, 0, 1)
+    const halfCoverage = fillCellByCoverage(1, 0, 0.5)
+    const quarterCoverage = fillCellByCoverage(2, 0, 0.25)
 
     const { cells, maxCoverage } = downsampleCanvasCoverage(
       imageData,
@@ -160,9 +177,9 @@ describe('downsampleCanvasCoverage', () => {
     expect(cells.length).toBe(3)
     expect(maxCoverage).toBeGreaterThan(0.9)
 
-    expect(cells[0].coverage).toBeCloseTo(1, 3)
-    expect(cells[1].coverage).toBeCloseTo(0.5, 2)
-    expect(cells[2].coverage).toBeCloseTo(0.25, 2)
+    expect(cells[0].coverage).toBeCloseTo(fullCoverage, 3)
+    expect(cells[1].coverage).toBeCloseTo(halfCoverage, 2)
+    expect(cells[2].coverage).toBeCloseTo(quarterCoverage, 2)
 
     expect(cells[0].cellIndex).toBe(0)
     expect(cells[1].cellIndex).toBe(1)
@@ -249,8 +266,8 @@ describe('createTextData splash mask', () => {
 
   test('maps offscreen canvas coverage into mask and colors', () => {
     const coverage = [
-      { cellX: 10, cellY: 6, value: 1 },
-      { cellX: 30, cellY: 6, value: 0.5 },
+      { cellX: 10, cellY: 6, value: 1, color: [50, 90, 240] as [number, number, number] },
+      { cellX: 30, cellY: 6, value: 0.5, color: [255, 160, 160] as [number, number, number] },
     ]
 
     withCanvasStub(() => buildCoverageCanvasStub(coverage), () => {
