@@ -7,7 +7,7 @@ export const MIN_RIPPLE_INTENSITY = 0.06
 export const BACKGROUND_COLOR = '#082c4a'
 export const SCATTER_DURATION = 3000
 export const RIPPLE_STEP_DELAY_MS = 22
-export const EXPLOSION_RADIUS = 16
+export const EXPLOSION_RADIUS = 6
 export const EXPLOSION_DURATION_MS = 380
 
 const TEXT_CONTENT = 'VISUALCORE'

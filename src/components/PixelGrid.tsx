@@ -931,10 +931,14 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
       const { cellX, cellY } = coords
       clearExplosionTimers()
 
-      for (let dy = -EXPLOSION_RADIUS; dy <= EXPLOSION_RADIUS; dy += 1) {
-        for (let dx = -EXPLOSION_RADIUS; dx <= EXPLOSION_RADIUS; dx += 1) {
+      const ringThickness = 2
+      const innerRadius = Math.max(EXPLOSION_RADIUS - ringThickness, 0)
+      const outerRadius = EXPLOSION_RADIUS
+
+      for (let dy = -outerRadius; dy <= outerRadius; dy += 1) {
+        for (let dx = -outerRadius; dx <= outerRadius; dx += 1) {
           const distance = Math.hypot(dx, dy)
-          if (distance > EXPLOSION_RADIUS) {
+          if (distance < innerRadius || distance > outerRadius) {
             continue
           }
 
@@ -944,23 +948,20 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
             continue
           }
 
-          const normalized = distance / Math.max(EXPLOSION_RADIUS, 1)
+          const normalized = distance / Math.max(outerRadius, 1)
           const delay = normalized * EXPLOSION_DURATION_MS
-          const intensity = Math.max(0.25, 1 - normalized * 0.75)
+          const pulse = 1 - Math.abs(distance - outerRadius + ringThickness / 2) / Math.max(ringThickness / 2, 1)
+          const intensity = clamp(0.45 + pulse * 0.4, 0.45, 1)
 
           const timer = window.setTimeout(() => {
-            igniteCell(targetX, targetY, intensity)
-            scatterCell(targetY * GRID_SIZE + targetX, {
-              intensity,
-              allowDuplicate: true,
-            })
+            trySpawnHighlightRef.current(targetY * GRID_SIZE + targetX, intensity)
           }, delay)
 
           explosionTimersRef.current.push(timer)
         }
       }
     },
-    [clearExplosionTimers, getCellFromEvent, igniteCell, scatterCell],
+    [clearExplosionTimers, getCellFromEvent, trySpawnHighlightRef],
   )
 
   const scatterAll = useCallback(
