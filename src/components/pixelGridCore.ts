@@ -1,4 +1,34 @@
 export const GRID_SIZE = 128
+
+export interface VisualcoreDebugState {
+  mask: Float32Array
+  colors: Float32Array
+  cellIndices: ReadonlyArray<number>
+  sourceDataURL: string
+  toDataURL: () => string
+  showPreview: () => void
+}
+
+type GlobalWithProcessEnv = typeof globalThis & {
+  process?: {
+    env?: {
+      NODE_ENV?: string
+    }
+  }
+}
+
+type ImportMetaWithOptionalEnv = ImportMeta & {
+  readonly env?: {
+    readonly MODE?: string
+  }
+}
+
+declare global {
+  interface Window {
+    __visualcoreDebug?: VisualcoreDebugState
+    __VISUALCORE_AUTO_PREVIEW?: boolean
+  }
+}
 export const TEXT_ALPHA = 0.85
 export const HIGHLIGHT_ALPHA = 0.96
 export const DECAY_FACTOR = 0.965
@@ -283,30 +313,6 @@ export interface TextData {
   cellIndexLookup: Int32Array
 }
 
-interface PixelGridDebugState {
-  mask: Float32Array
-  colors: Float32Array
-  cellIndices: ReadonlyArray<number>
-  sourceDataURL: string
-  toDataURL: () => string
-  showPreview: () => void
-}
-
-interface GlobalWithProcessEnv {
-  process?: {
-    env?: {
-      NODE_ENV?: string
-    }
-  }
-}
-
-declare global {
-  interface Window {
-    __visualcoreDebug?: PixelGridDebugState
-    __VISUALCORE_AUTO_PREVIEW?: boolean
-  }
-}
-
 export const RIPPLE_OFFSETS: Array<[number, number]> = [
   [1, 0],
   [-1, 0],
@@ -500,7 +506,7 @@ export const createTextData = (): TextData => {
   assertInvariant(minValue >= 0, 'mask coverage contains negative values')
 
   if (typeof window !== 'undefined') {
-    const debug: PixelGridDebugState = {
+    const debug = {
       mask,
       colors,
       cellIndices,
@@ -616,12 +622,25 @@ export const createTextData = (): TextData => {
     }
     window.__visualcoreDebug = debug
 
-    const isTestEnv =
-      typeof globalThis !== 'undefined' &&
-      ((globalThis as GlobalWithProcessEnv).process?.env?.NODE_ENV === 'test')
-    const importMetaEnv =
-      typeof import.meta !== 'undefined' && 'env' in import.meta ? import.meta.env : undefined
-    const isProdEnv = importMetaEnv?.MODE === 'production'
+    const nodeEnv = (() => {
+      if (typeof globalThis !== 'object' || globalThis === null || !('process' in globalThis)) {
+        return undefined
+      }
+      const withProcess = globalThis as GlobalWithProcessEnv
+      const value = withProcess.process?.env?.NODE_ENV
+      return typeof value === 'string' ? value : undefined
+    })()
+
+    const importMetaMode = (() => {
+      if (typeof import.meta === 'undefined') {
+        return undefined
+      }
+      const meta = import.meta as ImportMetaWithOptionalEnv
+      return meta.env?.MODE
+    })()
+
+    const isTestEnv = nodeEnv === 'test'
+    const isProdEnv = importMetaMode === 'production'
     const autoPreviewSetting = window.__VISUALCORE_AUTO_PREVIEW
     const shouldAutoPreview = !isTestEnv && !isProdEnv && autoPreviewSetting === true
 

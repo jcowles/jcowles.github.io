@@ -1,7 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { createTextData, downsampleCanvasCoverage } from './pixelGridCore'
-
-const GRID_SIZE = 64
+import { GRID_SIZE, createTextData, downsampleCanvasCoverage } from './pixelGridCore'
 
 const SCALE = 18
 
@@ -130,13 +128,16 @@ describe('downsampleCanvasCoverage', () => {
     const height = gridSize * scale
     const imageData = new Uint8ClampedArray(width * height * 4)
 
-    const fillCell = (cellX: number, cellY: number, alpha: number) => {
+    const fillCell = (cellX: number, cellY: number, intensity: number) => {
       for (let sy = 0; sy < scale; sy += 1) {
         const pixelY = cellY * scale + sy
         for (let sx = 0; sx < scale; sx += 1) {
           const pixelX = cellX * scale + sx
           const index = (pixelY * width + pixelX) * 4
-          imageData[index + 3] = alpha
+          imageData[index] = intensity
+          imageData[index + 1] = intensity
+          imageData[index + 2] = intensity
+          imageData[index + 3] = 255
         }
       }
     }
@@ -145,7 +146,15 @@ describe('downsampleCanvasCoverage', () => {
     fillCell(1, 0, 128)
     fillCell(2, 0, 64)
 
-    const { cells, maxCoverage } = downsampleCanvasCoverage(imageData, width, height, gridSize, scale, 0.05, 0.01)
+    const { cells, maxCoverage } = downsampleCanvasCoverage(
+      imageData,
+      width,
+      height,
+      gridSize,
+      scale,
+      0.05,
+      0.05,
+    )
 
     expect(cells.length).toBe(3)
     expect(maxCoverage).toBeGreaterThan(0.9)
