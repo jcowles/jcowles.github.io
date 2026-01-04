@@ -1,34 +1,4 @@
 export const GRID_SIZE = 128
-
-export interface VisualcoreDebugState {
-  mask: Float32Array
-  colors: Float32Array
-  cellIndices: ReadonlyArray<number>
-  sourceDataURL: string
-  toDataURL: () => string
-  showPreview: () => void
-}
-
-type GlobalWithProcessEnv = typeof globalThis & {
-  process?: {
-    env?: {
-      NODE_ENV?: string
-    }
-  }
-}
-
-type ImportMetaWithOptionalEnv = ImportMeta & {
-  readonly env?: {
-    readonly MODE?: string
-  }
-}
-
-declare global {
-  interface Window {
-    __visualcoreDebug?: VisualcoreDebugState
-    __VISUALCORE_AUTO_PREVIEW?: boolean
-  }
-}
 export const TEXT_ALPHA = 0.85
 export const HIGHLIGHT_ALPHA = 0.96
 export const DECAY_FACTOR = 0.965
@@ -82,7 +52,8 @@ const CURL_NOISE_SCALE = 0.0125
 const CURL_NOISE_EPSILON = 0.006
 export const GRIDLINE_ALPHA = 0.14
 
-export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+export const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value))
 
 export const computeSweepReveal = (progress: number, ratio: number) => {
   if (progress <= 0) {
@@ -145,6 +116,44 @@ export interface ScatterParticle {
   intensity: number
   ageMs: number
   lastCellIndex: number
+}
+
+export interface TextData {
+  mask: Float32Array
+  colors: Float32Array
+  revealRatios: Float32Array
+  cellIndices: Int32Array
+  cellIndexLookup: Int32Array
+}
+
+export interface VisualcoreDebugState {
+  mask: Float32Array
+  colors: Float32Array
+  cellIndices: ReadonlyArray<number>
+  sourceDataURL: string
+  toDataURL: () => string
+  showPreview: () => void
+}
+
+type GlobalWithProcessEnv = typeof globalThis & {
+  process?: {
+    env?: {
+      NODE_ENV?: string
+    }
+  }
+}
+
+type ImportMetaWithOptionalEnv = ImportMeta & {
+  readonly env?: {
+    readonly MODE?: string
+  }
+}
+
+declare global {
+  interface Window {
+    __visualcoreDebug?: VisualcoreDebugState
+    __VISUALCORE_AUTO_PREVIEW?: boolean
+  }
 }
 
 export const downsampleCanvasCoverage = (
@@ -305,25 +314,6 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
   }
 }
 
-export interface TextData {
-  mask: Float32Array
-  colors: Float32Array
-  revealRatios: Float32Array
-  cellIndices: Int32Array
-  cellIndexLookup: Int32Array
-}
-
-export const RIPPLE_OFFSETS: Array<[number, number]> = [
-  [1, 0],
-  [-1, 0],
-  [0, 1],
-  [0, -1],
-  [1, 1],
-  [1, -1],
-  [-1, 1],
-  [-1, -1],
-]
-
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t
 
 export const sampleGradient = (t: number): [number, number, number] => {
@@ -350,6 +340,17 @@ export const sampleGradient = (t: number): [number, number, number] => {
   const last = GRADIENT_STOPS[GRADIENT_STOPS.length - 1]
   return last.color
 }
+
+export const RIPPLE_OFFSETS: Array<[number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+  [1, 1],
+  [1, -1],
+  [-1, 1],
+  [-1, -1],
+]
 
 export const createTextData = (): TextData => {
   const totalCells = GRID_SIZE * GRID_SIZE
@@ -506,7 +507,7 @@ export const createTextData = (): TextData => {
   assertInvariant(minValue >= 0, 'mask coverage contains negative values')
 
   if (typeof window !== 'undefined') {
-    const debug = {
+    const debug: VisualcoreDebugState = {
       mask,
       colors,
       cellIndices,
@@ -514,7 +515,7 @@ export const createTextData = (): TextData => {
       toDataURL: () => createMaskPreview(mask, colors),
       showPreview: () => {
         const maskDataURL = debug.toDataURL()
-        const sourceDataURL = debug.sourceDataURL
+        const fallbackSourceDataURL = debug.sourceDataURL
         if (!maskDataURL) {
           return
         }
@@ -610,8 +611,8 @@ export const createTextData = (): TextData => {
 
         const sourceImg = container.querySelector('img[data-type="source"]') as HTMLImageElement | null
         const sourceLabel = container.querySelector('[data-type="source-label"]') as HTMLDivElement | null
-        if (sourceDataURL && sourceImg && sourceLabel) {
-          sourceImg.src = sourceDataURL
+        if (fallbackSourceDataURL && sourceImg && sourceLabel) {
+          sourceImg.src = fallbackSourceDataURL
           sourceImg.style.display = 'block'
           sourceLabel.style.display = 'block'
         } else if (sourceImg && sourceLabel) {

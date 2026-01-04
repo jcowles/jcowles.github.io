@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
-import { GRID_SIZE, createTextData, downsampleCanvasCoverage } from './pixelGridCore'
+import { createTextData, downsampleCanvasCoverage } from './pixelGridCore'
 
+const GRID_SIZE = 64
 const SCALE = 18
 
 const buildCanvasStub = () => {
