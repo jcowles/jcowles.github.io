@@ -41,7 +41,7 @@ describe('App layout', () => {
 
     expect(pixelGrid).not.toHaveAttribute('data-phase')
     expect(renderSpy).toHaveBeenCalledTimes(1)
-    expect(renderSpy).toHaveBeenCalledWith({})
+    expect(renderSpy).toHaveBeenCalledWith({ orientation: 'landscape' })
   })
 
   test('exposes the brand text for assistive tech', () => {

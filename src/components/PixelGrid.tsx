@@ -40,7 +40,7 @@ import {
   FLICKER_UPDATE_INTERVAL_MS,
 } from './pixelGridCore'
 
-import type { ExplosionParticle, ScatterParticle } from './pixelGridCore'
+import type { ExplosionParticle, PixelGridOrientation, ScatterParticle } from './pixelGridCore'
 
 const computeFlicker = (cellIndex: number, timeMs: number) => {
   if (FLICKER_INTENSITY <= 0 || FLICKER_UPDATE_INTERVAL_MS <= 0) {
@@ -58,10 +58,11 @@ const computeFlicker = (cellIndex: number, timeMs: number) => {
 interface PixelGridProps {
   scatterSignal?: number
   curlAmount?: number
+  orientation?: PixelGridOrientation
 }
 
-const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
-  const textData = useMemo(() => createTextData(), [])
+const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }: PixelGridProps) => {
+  const textData = useMemo(() => createTextData(orientation), [orientation])
   const flickerEnabled = FLICKER_INTENSITY > 0 && FLICKER_UPDATE_INTERVAL_MS > 0
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -96,7 +97,10 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const scatterCellRef = useRef<
     (cellIndex: number, options?: { intensity?: number; allowDuplicate?: boolean }) => void
   >(() => {})
-  const trySpawnHighlightRef = useRef<(cellIndex: number, intensity: number) => void>(() => {})
+  const trySpawnHighlightRef = useRef<(cellIndex: number, intensity: number) => void>((cellIndex, intensity) => {
+    void cellIndex
+    void intensity
+  })
   const pendingTextScatterRef = useRef<number[]>([])
   const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const intensityAgeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))

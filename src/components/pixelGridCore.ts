@@ -51,12 +51,15 @@ export const SCATTER_PARTICLE_CURL_DEFAULT = 0.75
 const CURL_NOISE_SCALE = 0.0125
 const CURL_NOISE_EPSILON = 0.006
 export const GRIDLINE_ALPHA = 0.14
-export const FLICKER_INTENSITY = 0.15
+export const FLICKER_INTENSITY = 0.015
 export const FLICKER_UPDATE_INTERVAL_MS = 120
 export const TEXT_FADE_OUT_DURATION_MS = TEXT_REVEAL_DURATION_MS
 export const TEXT_LOOP_PAUSE_MS = 2000
 
+export type PixelGridOrientation = 'landscape' | 'portrait'
+
 export const clamp = (value: number, min: number, max: number) =>
+
   Math.min(max, Math.max(min, value))
 
 export const computeSweepReveal = (progress: number, ratio: number) => {
@@ -276,7 +279,11 @@ const createMaskPreview = (mask: Float32Array, colors: Float32Array): string => 
   return typeof previewCanvas.toDataURL === 'function' ? previewCanvas.toDataURL('image/png') : ''
 }
 
-const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array): TextData => {
+const createFallbackTextData = (
+  totalCells: number,
+  cellIndexLookup: Int32Array,
+  orientation: PixelGridOrientation,
+): TextData => {
   const mask = new Float32Array(totalCells)
   const colors = new Float32Array(totalCells * 3)
   const revealRatios = new Float32Array(totalCells)
@@ -291,7 +298,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
     for (let x = 0; x < GRID_SIZE; x += 1) {
       const cellIndex = y * GRID_SIZE + x
       const offset = cellIndex * 3
-      const ratio = x / Math.max(1, GRID_SIZE - 1)
+      const ratio = orientation === 'portrait' ? y / Math.max(1, GRID_SIZE - 1) : x / Math.max(1, GRID_SIZE - 1)
 
       if (y >= minStripe && y <= maxStripe) {
         const [r, g, b] = sampleGradient(ratio)
@@ -300,6 +307,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
         colors[offset + 2] = b
         mask[cellIndex] = 1
         revealRatios[cellIndex] = ratio
+        fadeRatios[cellIndex] = ratio
         cellIndexLookup[cellIndex] = cellIndices.length
         cellIndices.push(cellIndex)
       } else {
@@ -308,9 +316,8 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
         colors[offset + 2] = DEFAULT_COLOR[2]
         mask[cellIndex] = 0
         revealRatios[cellIndex] = 1
+        fadeRatios[cellIndex] = ratio
       }
-
-      fadeRatios[cellIndex] = ratio
     }
   }
 
@@ -362,7 +369,7 @@ export const RIPPLE_OFFSETS: Array<[number, number]> = [
   [-1, -1],
 ]
 
-export const createTextData = (): TextData => {
+export const createTextData = (orientation: PixelGridOrientation = 'landscape'): TextData => {
   const totalCells = GRID_SIZE * GRID_SIZE
   const cellIndexLookup = new Int32Array(totalCells)
   cellIndexLookup.fill(-1)
@@ -374,6 +381,9 @@ export const createTextData = (): TextData => {
   const fadeRatios = new Float32Array(totalCells)
   const cellIndices: number[] = []
 
+  if (typeof document === 'undefined') {
+    return createFallbackTextData(totalCells, cellIndexLookup, orientation)
+  }
 
   const canvas = document.createElement('canvas')
   canvas.width = GRID_SIZE * CANVAS_SCALE
@@ -381,7 +391,7 @@ export const createTextData = (): TextData => {
 
   const ctx = canvas.getContext('2d')
   if (!ctx || typeof ctx.fillText !== 'function' || typeof ctx.getImageData !== 'function') {
-    return createFallbackTextData(totalCells, cellIndexLookup)
+    return createFallbackTextData(totalCells, cellIndexLookup, orientation)
   }
 
   ctx.clearRect(0, 0, canvas.width, canvas.height)
@@ -406,7 +416,15 @@ export const createTextData = (): TextData => {
     ctx.fillStyle = '#ffffff'
   }
 
-  ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
+  if (orientation === 'portrait') {
+    ctx.save()
+    ctx.translate(canvas.width / 2, canvas.height / 2)
+    ctx.rotate(Math.PI / 2)
+    ctx.fillText(TEXT_CONTENT, 0, 0)
+    ctx.restore()
+  } else {
+    ctx.fillText(TEXT_CONTENT, canvas.width / 2, canvas.height / 2)
+  }
 
   const sourceDataURL = typeof canvas.toDataURL === 'function' ? canvas.toDataURL('image/png') : ''
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
@@ -422,7 +440,7 @@ export const createTextData = (): TextData => {
   )
 
   if (cells.length === 0 || maxCoverage <= 0) {
-    return createFallbackTextData(totalCells, cellIndexLookup)
+    return createFallbackTextData(totalCells, cellIndexLookup, orientation)
   }
 
   cells.sort((a, b) => b.coverage - a.coverage)
@@ -475,14 +493,17 @@ export const createTextData = (): TextData => {
     }
 
     const offset = cellIndex * 3
-    const ratio = width > 1 ? (cell.x - minX) / (width - 1) : 0.5
+    const directionalRatio =
+      orientation === 'portrait'
+        ? (height > 1 ? (cell.y - minY) / Math.max(1, height - 1) : 0.5)
+        : (width > 1 ? (cell.x - minX) / Math.max(1, width - 1) : 0.5)
     const [r, g, b] = cell.color
     colors[offset] = r
     colors[offset + 1] = g
     colors[offset + 2] = b
     mask[cellIndex] = normalizedCoverage
-    revealRatios[cellIndex] = ratio
-    fadeRatios[cellIndex] = ratio
+    revealRatios[cellIndex] = directionalRatio
+    fadeRatios[cellIndex] = directionalRatio
 
     if (cellIndexLookup[cellIndex] === -1) {
       cellIndexLookup[cellIndex] = cellIndices.length
