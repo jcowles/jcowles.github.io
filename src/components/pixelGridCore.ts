@@ -51,6 +51,7 @@ export const SCATTER_PARTICLE_CURL_DEFAULT = 0.25
 const CURL_NOISE_SCALE = 0.0125
 const CURL_NOISE_EPSILON = 0.006
 export const GRIDLINE_ALPHA = 0.14
+export const FLICKER_INTENSITY = 0.1
 
 export const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))

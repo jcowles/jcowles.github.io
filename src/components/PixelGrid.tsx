@@ -34,8 +34,17 @@ import {
   computeCurlNoise,
   computeSweepReveal,
   createTextData,
+  FLICKER_INTENSITY,
 } from './pixelGridCore'
 import type { ExplosionParticle, ScatterParticle } from './pixelGridCore'
+
+const computeFlicker = (cellIndex: number, timeMs: number) => {
+  const timeBucket = Math.floor(timeMs / 45)
+  const seed = cellIndex * 374761393 + timeBucket * 668265263
+  const value = Math.sin(seed) * 43758.5453123
+  const normalized = value - Math.floor(value)
+  return 1 + (normalized - 0.5) * 2 * FLICKER_INTENSITY
+}
 
 interface PixelGridProps {
   scatterSignal?: number
@@ -176,6 +185,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     const { mask, colors, revealRatios } = textData
     const revealProgress = textRevealProgressRef.current
     const phaseVisibility = 0.45
+    const flickerTime = noiseTimeRef.current
 
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
@@ -235,10 +245,12 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         const r = Math.round(baseR + (255 - baseR) * highlightStrength)
         const g = Math.round(baseG + (255 - baseG) * highlightStrength)
         const b = Math.round(baseB + (255 - baseB) * highlightStrength)
+        const flicker = computeFlicker(cellIndex, flickerTime)
+        const alphaWithFlicker = Math.min(finalAlpha * flicker, 1)
 
         const cellX = cellIndex % GRID_SIZE
         const cellY = Math.floor(cellIndex / GRID_SIZE)
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${finalAlpha})`
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alphaWithFlicker})`
         ctx.fillRect(offsetX + cellX * cellSize, offsetY + cellY * cellSize, cellSize, cellSize)
       }
 
@@ -280,9 +292,11 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         const r = Math.round(baseR + (255 - baseR) * highlightStrength)
         const g = Math.round(baseG + (255 - baseG) * highlightStrength)
         const b = Math.round(baseB + (255 - baseB) * highlightStrength)
+        const flicker = computeFlicker(cellIndex, flickerTime)
+        const alphaWithFlicker = Math.min(highlightAlpha * flicker, 1)
         const cellX = cellIndex % GRID_SIZE
         const cellY = Math.floor(cellIndex / GRID_SIZE)
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${highlightAlpha})`
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alphaWithFlicker})`
         ctx.fillRect(offsetX + cellX * cellSize, offsetY + cellY * cellSize, cellSize, cellSize)
       }
     }
