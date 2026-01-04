@@ -5,8 +5,15 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const renderSpy = vi.fn()
 
+interface MockPixelGridProps {
+  phase?: string
+  scatterSignal?: number
+  onScatterStart?: () => void
+  onScatterComplete?: () => void
+}
+
 vi.mock('./components/PixelGrid', () => {
-  const MockPixelGrid = (props: any) => {
+  const MockPixelGrid = (props: MockPixelGridProps) => {
     renderSpy(props)
     return <div data-testid="mock-pixel-grid" />
   }
@@ -15,8 +22,6 @@ vi.mock('./components/PixelGrid', () => {
 })
 
 import App from './App'
-
-const noop = () => {}
 
 afterEach(() => {
   vi.useRealTimers()
