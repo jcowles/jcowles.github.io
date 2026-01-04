@@ -275,20 +275,19 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         const fadeRatio = clamp(fadeRatios[cellIndex], 0, 1)
         const shouldHideText = isFading && fadeProgress >= fadeRatio
 
+        let baseContribution = baseAlpha
         if (shouldHideText) {
           if (textFadeTriggeredRef.current[index] === 0) {
             textFadeTriggeredRef.current[index] = 1
-            intensities[cellIndex] = 0
-            highlightActiveFlagsRef.current[cellIndex] = 0
             trySpawnHighlightRef.current(cellIndex, Math.max(0.6, intensity))
             if (scatterFn) {
               scatterFn(cellIndex, { intensity: Math.min(1, intensity + 0.4), allowDuplicate: true })
             }
           }
-          continue
+          baseContribution = 0
         }
 
-        const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
+        const finalAlpha = Math.min(baseContribution + highlightAlpha, 1)
         if (finalAlpha <= 0) {
           continue
         }
