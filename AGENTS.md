@@ -17,6 +17,7 @@
 3. **Animations & Interactivity**
    - The intro timing is governed by constants in `src/App.tsx` (`INTRO_DURATION`, per-character durations). When tweaking animation curves or timings, keep transitions accessible (e.g., allow keyboard skip via space/enter and pointer click).
    - The pixel grid relies on canvas rendering tied to `window.requestAnimationFrame`. Any adjustments should preserve performance at 128×128 cells.
+   - All splash/grid parameters (timings, colors, flicker, etc.) live in `src/components/pixelGridCore.ts`; update values there so everything stays centralized.
 
 4. **Testing**
    - Tests live alongside components (e.g., `src/App.test.tsx`). Use Vitest with Testing Library. There is a canvas mock in `src/test/setup.ts`; extend it if more canvas APIs are used.
