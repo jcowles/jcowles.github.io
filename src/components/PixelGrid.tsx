@@ -636,7 +636,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       lastParticleSpawnRef.current[cellIndex] = now
       spawnScatterParticle(cellIndex, intensity)
     },
-    [spawnScatterParticle],
+    [lastParticleSpawnRef, spawnScatterParticle],
   )
 
   const getCellFromEvent = useCallback((event: PointerEvent<HTMLCanvasElement>) => {
@@ -686,7 +686,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
 
       scheduleFrame()
     },
-    [scheduleFrame, trySpawnParticleForHighlight],
+    [intensitiesRef, intensityAgeRef, scheduleFrame, trySpawnParticleForHighlight],
   )
 
   const applyRipple = useCallback(
@@ -725,7 +725,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         }
       }
     },
-    [igniteCell],
+    [clearRippleTimers, igniteCell],
   )
 
   const scatterCell = useCallback(
@@ -870,7 +870,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       lastFrameTimeRef.current = null
 
       textScatterFlagsRef.current.fill(0)
-      remainingTextCellsRef.current = textData.cellIndices.length
+      remainingTextCellsRef.current = indices.length
       scatterStartedRef.current = false
       scatterCompleteRef.current = false
       scatterParticlesRef.current = []
@@ -894,9 +894,8 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       clearRippleTimers,
       clearScatterCompletionGuard,
       clearScatterTimers,
-      scatterCell,
       scheduleFrame,
-      textData.cellIndices,
+      textData,
     ],
   )
 
@@ -1000,6 +999,14 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     window.addEventListener('resize', resize)
     scheduleFrame()
 
+    const pendingTextScatter = pendingTextScatterRef.current
+    const textRevealTriggered = textRevealTriggeredRef.current
+    const highlightActive = highlightActiveRef.current
+    const highlightFlags = highlightActiveFlagsRef.current
+    const lastParticleSpawn = lastParticleSpawnRef.current
+    const intensities = intensitiesRef.current
+    const intensityAge = intensityAgeRef.current
+
     return () => {
       window.removeEventListener('resize', resize)
       if (animationFrameRef.current !== null) {
@@ -1012,13 +1019,13 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       globalExplosionActiveRef.current = false
       globalExplosionParticlesRef.current = []
       scatterParticlesRef.current = []
-      pendingTextScatterRef.current.length = 0
-      textRevealTriggeredRef.current.fill(0)
-      highlightActiveRef.current.length = 0
-      highlightActiveFlagsRef.current.fill(0)
-      lastParticleSpawnRef.current.fill(-Infinity)
-      intensitiesRef.current.fill(0)
-      intensityAgeRef.current.fill(0)
+      pendingTextScatter.length = 0
+      textRevealTriggered.fill(0)
+      highlightActive.length = 0
+      highlightFlags.fill(0)
+      lastParticleSpawn.fill(-Infinity)
+      intensities.fill(0)
+      intensityAge.fill(0)
       lastFrameTimeRef.current = null
       if (autoScatterTimerRef.current !== null) {
         window.clearTimeout(autoScatterTimerRef.current)
