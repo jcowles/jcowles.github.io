@@ -47,11 +47,12 @@ export const SCATTER_PARTICLE_MAX_COUNT = 800
 export const SCATTER_PARTICLE_FRAME_MS = 1000 / 60
 export const TRAIL_RELEASE_MAX_AGE_MS = 400
 export const SCATTER_PARTICLE_SPAWN_COOLDOWN_MS = 140
-export const SCATTER_PARTICLE_CURL_DEFAULT = 0.25
+export const SCATTER_PARTICLE_CURL_DEFAULT = 0.75
 const CURL_NOISE_SCALE = 0.0125
 const CURL_NOISE_EPSILON = 0.006
 export const GRIDLINE_ALPHA = 0.14
 export const FLICKER_INTENSITY = 0.1
+export const FLICKER_UPDATE_INTERVAL_MS = 125
 
 export const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))

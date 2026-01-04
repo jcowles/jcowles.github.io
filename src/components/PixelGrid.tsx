@@ -35,11 +35,17 @@ import {
   computeSweepReveal,
   createTextData,
   FLICKER_INTENSITY,
+  FLICKER_UPDATE_INTERVAL_MS,
 } from './pixelGridCore'
 import type { ExplosionParticle, ScatterParticle } from './pixelGridCore'
 
 const computeFlicker = (cellIndex: number, timeMs: number) => {
-  const timeBucket = Math.floor(timeMs / 45)
+  if (FLICKER_INTENSITY <= 0 || FLICKER_UPDATE_INTERVAL_MS <= 0) {
+    return 1
+  }
+
+  const bucketSize = Math.max(1, FLICKER_UPDATE_INTERVAL_MS)
+  const timeBucket = Math.floor(timeMs / bucketSize)
   const seed = cellIndex * 374761393 + timeBucket * 668265263
   const value = Math.sin(seed) * 43758.5453123
   const normalized = value - Math.floor(value)
@@ -53,6 +59,7 @@ interface PixelGridProps {
 
 const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const textData = useMemo(() => createTextData(), [])
+  const flickerEnabled = FLICKER_INTENSITY > 0 && FLICKER_UPDATE_INTERVAL_MS > 0
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
@@ -185,7 +192,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     const { mask, colors, revealRatios } = textData
     const revealProgress = textRevealProgressRef.current
     const phaseVisibility = 0.45
-    const flickerTime = noiseTimeRef.current
+    const flickerTime = flickerEnabled ? noiseTimeRef.current : 0
 
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
@@ -323,6 +330,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       ctx.restore()
     }
   }, [
+    flickerEnabled,
     globalExplosionActiveRef,
     globalExplosionParticlesRef,
     highlightActiveFlagsRef,
@@ -566,7 +574,8 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         explosionHasEnergy ||
         globalExplosionActiveRef.current ||
         needsReveal ||
-        framePendingRef.current
+        framePendingRef.current ||
+        flickerEnabled
 
       frameRunningRef.current = false
 
@@ -577,7 +586,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         lastFrameTimeRef.current = null
       }
     },
-    [decayIntensities, draw, updateGlobalExplosion, updateScatterParticles],
+    [decayIntensities, draw, flickerEnabled, updateGlobalExplosion, updateScatterParticles],
   )
 
   const scheduleFrame = useCallback(
