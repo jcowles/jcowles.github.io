@@ -1,6 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { act } from 'react'
+import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const renderSpy = vi.fn()
