@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, type PointerEvent } from 'react'
 import {
-  AUTO_SCATTER_INTERVAL_MS,
   BACKGROUND_COLOR,
   DECAY_FACTOR,
   EXPLOSION_DURATION_MS,
@@ -30,13 +29,17 @@ import {
   TEXT_ALPHA,
   TEXT_REVEAL_DURATION_MS,
   TRAIL_RELEASE_MAX_AGE_MS,
+  TEXT_FADE_OUT_DURATION_MS,
+  TEXT_LOOP_PAUSE_MS,
   clamp,
   computeCurlNoise,
+
   computeSweepReveal,
   createTextData,
   FLICKER_INTENSITY,
   FLICKER_UPDATE_INTERVAL_MS,
 } from './pixelGridCore'
+
 import type { ExplosionParticle, ScatterParticle } from './pixelGridCore'
 
 const computeFlicker = (cellIndex: number, timeMs: number) => {
@@ -62,7 +65,9 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const flickerEnabled = FLICKER_INTENSITY > 0 && FLICKER_UPDATE_INTERVAL_MS > 0
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
   const animationFrameRef = useRef<number | null>(null)
+  const flickerTimerRef = useRef<number | null>(null)
   const dprRef = useRef<number>(window.devicePixelRatio || 1)
   const metricsRef = useRef<{ offsetX: number; offsetY: number; cellSize: number }>({
     offsetX: 0,
@@ -84,7 +89,6 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const globalExplosionActiveRef = useRef<boolean>(false)
   const lastFrameTimeRef = useRef<number | null>(null)
   const textRevealProgressRef = useRef<number>(0)
-  const autoScatterTimerRef = useRef<number | null>(null)
   const scatterActiveRef = useRef<boolean>(false)
   const pendingForcedScatterRef = useRef<boolean>(false)
   const completeScatterRef = useRef<() => void>(() => {})
@@ -92,6 +96,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const scatterCellRef = useRef<
     (cellIndex: number, options?: { intensity?: number; allowDuplicate?: boolean }) => void
   >(() => {})
+  const trySpawnHighlightRef = useRef<(cellIndex: number, intensity: number) => void>(() => {})
   const pendingTextScatterRef = useRef<number[]>([])
   const lastParticleSpawnRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const intensityAgeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
@@ -102,6 +107,12 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const frameRunningRef = useRef<boolean>(false)
   const framePendingRef = useRef<boolean>(false)
   const textRevealTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
+  const textFadeTriggeredRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
+  const textFadeOutActiveRef = useRef(false)
+  const textFadeOutProgressRef = useRef(0)
+  const textPauseActiveRef = useRef(false)
+  const textPauseTimerRef = useRef<number | null>(null)
+  const startNextCycleRef = useRef<() => void>(() => {})
   const particleSpawnInitRef = useRef(false)
 
   if (!particleSpawnInitRef.current) {
@@ -129,6 +140,21 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
   const clearRippleTimers = useCallback(() => {
     rippleTimersRef.current.forEach((timer) => window.clearTimeout(timer))
     rippleTimersRef.current = []
+  }, [])
+
+  const clearFadeOutState = useCallback(() => {
+    textFadeOutActiveRef.current = false
+    textFadeOutProgressRef.current = 0
+    if (textPauseTimerRef.current !== null) {
+      window.clearTimeout(textPauseTimerRef.current)
+      textPauseTimerRef.current = null
+    }
+    textPauseActiveRef.current = false
+    textFadeTriggeredRef.current.fill(0)
+    if (flickerTimerRef.current !== null) {
+      window.clearTimeout(flickerTimerRef.current)
+      flickerTimerRef.current = null
+    }
   }, [])
 
   const depositIntensity = useCallback((cellIndex: number, value: number) => {
@@ -189,10 +215,13 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     const { width, height } = canvas
     const { offsetX, offsetY, cellSize } = metricsRef.current
     const intensities = intensitiesRef.current
-    const { mask, colors, revealRatios } = textData
+    const { mask, colors, revealRatios, fadeRatios } = textData
     const revealProgress = textRevealProgressRef.current
     const phaseVisibility = 0.45
     const flickerTime = flickerEnabled ? noiseTimeRef.current : 0
+    const isFading = textFadeOutActiveRef.current || textPauseActiveRef.current
+    const fadeProgress = isFading ? clamp(textFadeOutProgressRef.current, 0, 1) : 0
+    const scatterFn = scatterCellRef.current
 
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
@@ -243,6 +272,22 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         const baseAlpha = hasTextFill ? TEXT_ALPHA * baseVisibility * normalizedCoverage : 0
 
         const highlightAlpha = intensity > 0 ? intensity * HIGHLIGHT_ALPHA : 0
+        const fadeRatio = clamp(fadeRatios[cellIndex], 0, 1)
+        const shouldHideText = isFading && fadeProgress >= fadeRatio
+
+        if (shouldHideText) {
+          if (textFadeTriggeredRef.current[index] === 0) {
+            textFadeTriggeredRef.current[index] = 1
+            intensities[cellIndex] = 0
+            highlightActiveFlagsRef.current[cellIndex] = 0
+            trySpawnHighlightRef.current(cellIndex, Math.max(0.6, intensity))
+            if (scatterFn) {
+              scatterFn(cellIndex, { intensity: Math.min(1, intensity + 0.4), allowDuplicate: true })
+            }
+          }
+          continue
+        }
+
         const finalAlpha = Math.min(baseAlpha + highlightAlpha, 1)
         if (finalAlpha <= 0) {
           continue
@@ -250,7 +295,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
 
         const highlightStrength = Math.min(1, intensity * HIGHLIGHT_BLEND)
         const r = Math.round(baseR + (255 - baseR) * highlightStrength)
-        const g = Math.round(baseG + (255 - baseG) * highlightStrength)
+        const g = Math.round(baseG + (255 - baseB) * highlightStrength)
         const b = Math.round(baseB + (255 - baseB) * highlightStrength)
         const flicker = computeFlicker(cellIndex, flickerTime)
         const alphaWithFlicker = Math.min(finalAlpha * flicker, 1)
@@ -564,6 +609,29 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       }
 
       const particlesHaveEnergy = updateScatterParticles(frameDelta)
+
+      if (textFadeOutActiveRef.current) {
+        const fadeIncrement = TEXT_FADE_OUT_DURATION_MS > 0 ? deltaMs / TEXT_FADE_OUT_DURATION_MS : 1
+        const nextFade = Math.min(1, textFadeOutProgressRef.current + fadeIncrement)
+        textFadeOutProgressRef.current = nextFade
+        if (nextFade >= 1) {
+          textFadeOutActiveRef.current = false
+          if (!textPauseActiveRef.current) {
+            textPauseActiveRef.current = true
+            if (textPauseTimerRef.current !== null) {
+              window.clearTimeout(textPauseTimerRef.current)
+            }
+            textPauseTimerRef.current = window.setTimeout(() => {
+              textPauseTimerRef.current = null
+              textPauseActiveRef.current = false
+              pendingForcedScatterRef.current = false
+              startNextCycleRef.current()
+            }, TEXT_LOOP_PAUSE_MS)
+          }
+        }
+      }
+
+
       draw()
 
       const needsReveal = textRevealProgressRef.current < 1
@@ -575,15 +643,28 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         globalExplosionActiveRef.current ||
         needsReveal ||
         framePendingRef.current ||
-        flickerEnabled
+        textFadeOutActiveRef.current
 
       frameRunningRef.current = false
 
       if (shouldContinue) {
+        if (flickerTimerRef.current !== null) {
+          window.clearTimeout(flickerTimerRef.current)
+          flickerTimerRef.current = null
+        }
         framePendingRef.current = false
         animationFrameRef.current = window.requestAnimationFrame(frameCallback)
       } else {
         lastFrameTimeRef.current = null
+        if (flickerEnabled && flickerTimerRef.current === null) {
+          const delay = Math.max(FLICKER_UPDATE_INTERVAL_MS, 16)
+          flickerTimerRef.current = window.setTimeout(() => {
+            flickerTimerRef.current = null
+            if (animationFrameRef.current === null) {
+              animationFrameRef.current = window.requestAnimationFrame(frameCallback)
+            }
+          }, delay)
+        }
       }
     },
     [decayIntensities, draw, flickerEnabled, updateGlobalExplosion, updateScatterParticles],
@@ -602,6 +683,11 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
         }
         window.cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
+      }
+
+      if (flickerTimerRef.current !== null) {
+        window.clearTimeout(flickerTimerRef.current)
+        flickerTimerRef.current = null
       }
 
       framePendingRef.current = false
@@ -661,6 +747,10 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     },
     [lastParticleSpawnRef, spawnScatterParticle],
   )
+
+  useEffect(() => {
+    trySpawnHighlightRef.current = trySpawnParticleForHighlight
+  }, [trySpawnParticleForHighlight])
 
   const getCellFromEvent = useCallback((event: PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
@@ -884,10 +974,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       scatterActiveRef.current = true
       pendingForcedScatterRef.current = false
 
-      if (autoScatterTimerRef.current !== null) {
-        window.clearTimeout(autoScatterTimerRef.current)
-        autoScatterTimerRef.current = null
-      }
+      clearFadeOutState()
 
       textRevealProgressRef.current = 0
       lastFrameTimeRef.current = null
@@ -914,6 +1001,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     },
     [
       clearExplosionTimers,
+      clearFadeOutState,
       clearRippleTimers,
       clearScatterCompletionGuard,
       clearScatterTimers,
@@ -922,55 +1010,27 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
     ],
   )
 
-  const scheduleAutoScatter = useCallback(function scheduleAutoScatterCallback() {
-    if (autoScatterTimerRef.current !== null) {
-      return
-    }
-    autoScatterTimerRef.current = window.setTimeout(() => {
-      autoScatterTimerRef.current = null
-      if (globalExplosionActiveRef.current || scatterActiveRef.current) {
-        scheduleAutoScatterCallback()
-        return
-      }
-      if (pendingForcedScatterRef.current) {
-        scatterAll({ force: true })
-        return
-      }
-      scatterAll()
-    }, AUTO_SCATTER_INTERVAL_MS)
-  }, [scatterAll])
-
   const completeScatter = useCallback(() => {
     if (!scatterActiveRef.current) {
       return
     }
     scatterActiveRef.current = false
-
-    if (pendingForcedScatterRef.current) {
-      if (globalExplosionActiveRef.current) {
-        scheduleAutoScatter()
-        return
-      }
-      pendingForcedScatterRef.current = false
-      scatterAll({ force: true })
-      return
+    if (!textFadeOutActiveRef.current && !textPauseActiveRef.current) {
+      clearFadeOutState()
+      textFadeOutActiveRef.current = true
+      scheduleFrame()
     }
-
-    scheduleAutoScatter()
-  }, [scatterAll, scheduleAutoScatter])
+  }, [clearFadeOutState, scheduleFrame])
   completeScatterRef.current = completeScatter
 
   useEffect(() => {
+    startNextCycleRef.current = () => scatterAll({ force: true })
     scatterAll({ force: true })
-    scheduleAutoScatter()
 
     return () => {
-      if (autoScatterTimerRef.current !== null) {
-        window.clearTimeout(autoScatterTimerRef.current)
-        autoScatterTimerRef.current = null
-      }
+      clearFadeOutState()
     }
-  }, [scheduleAutoScatter, scatterAll])
+  }, [clearFadeOutState, scatterAll])
 
   useEffect(() => {
     if (scatterSignal === lastScatterSignalRef.current) {
@@ -1050,14 +1110,16 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount }: PixelGridProps) => {
       intensities.fill(0)
       intensityAge.fill(0)
       lastFrameTimeRef.current = null
-      if (autoScatterTimerRef.current !== null) {
-        window.clearTimeout(autoScatterTimerRef.current)
-        autoScatterTimerRef.current = null
+      clearFadeOutState()
+      if (flickerTimerRef.current !== null) {
+        window.clearTimeout(flickerTimerRef.current)
+        flickerTimerRef.current = null
       }
       scheduleFrame(true)
     }
   }, [
     clearExplosionTimers,
+    clearFadeOutState,
     clearRippleTimers,
     clearScatterCompletionGuard,
     clearScatterTimers,

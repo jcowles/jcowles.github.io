@@ -1,4 +1,4 @@
-export const GRID_SIZE = 128
+export const GRID_SIZE = 72
 export const TEXT_ALPHA = 0.85
 export const HIGHLIGHT_ALPHA = 0.96
 export const DECAY_FACTOR = 0.965
@@ -51,8 +51,10 @@ export const SCATTER_PARTICLE_CURL_DEFAULT = 0.75
 const CURL_NOISE_SCALE = 0.0125
 const CURL_NOISE_EPSILON = 0.006
 export const GRIDLINE_ALPHA = 0.14
-export const FLICKER_INTENSITY = 0.1
-export const FLICKER_UPDATE_INTERVAL_MS = 125
+export const FLICKER_INTENSITY = 0.15
+export const FLICKER_UPDATE_INTERVAL_MS = 120
+export const TEXT_FADE_OUT_DURATION_MS = TEXT_REVEAL_DURATION_MS
+export const TEXT_LOOP_PAUSE_MS = 2000
 
 export const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))
@@ -126,6 +128,7 @@ export interface TextData {
   revealRatios: Float32Array
   cellIndices: Int32Array
   cellIndexLookup: Int32Array
+  fadeRatios: Float32Array
 }
 
 export interface VisualcoreDebugState {
@@ -277,6 +280,8 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
   const mask = new Float32Array(totalCells)
   const colors = new Float32Array(totalCells * 3)
   const revealRatios = new Float32Array(totalCells)
+  const fadeRatios = new Float32Array(totalCells)
+  revealRatios.fill(1)
   const cellIndices: number[] = []
 
   const minStripe = Math.floor(GRID_SIZE * 0.3)
@@ -286,9 +291,9 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
     for (let x = 0; x < GRID_SIZE; x += 1) {
       const cellIndex = y * GRID_SIZE + x
       const offset = cellIndex * 3
+      const ratio = x / Math.max(1, GRID_SIZE - 1)
 
       if (y >= minStripe && y <= maxStripe) {
-        const ratio = x / Math.max(1, GRID_SIZE - 1)
         const [r, g, b] = sampleGradient(ratio)
         colors[offset] = r
         colors[offset + 1] = g
@@ -304,6 +309,8 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
         mask[cellIndex] = 0
         revealRatios[cellIndex] = 1
       }
+
+      fadeRatios[cellIndex] = ratio
     }
   }
 
@@ -313,6 +320,7 @@ const createFallbackTextData = (totalCells: number, cellIndexLookup: Int32Array)
     revealRatios,
     cellIndices: Int32Array.from(cellIndices),
     cellIndexLookup,
+    fadeRatios,
   }
 }
 
@@ -363,11 +371,9 @@ export const createTextData = (): TextData => {
   const colors = new Float32Array(totalCells * 3)
   const revealRatios = new Float32Array(totalCells)
   revealRatios.fill(1)
+  const fadeRatios = new Float32Array(totalCells)
   const cellIndices: number[] = []
 
-  if (typeof document === 'undefined') {
-    return createFallbackTextData(totalCells, cellIndexLookup)
-  }
 
   const canvas = document.createElement('canvas')
   canvas.width = GRID_SIZE * CANVAS_SCALE
@@ -476,6 +482,7 @@ export const createTextData = (): TextData => {
     colors[offset + 2] = b
     mask[cellIndex] = normalizedCoverage
     revealRatios[cellIndex] = ratio
+    fadeRatios[cellIndex] = ratio
 
     if (cellIndexLookup[cellIndex] === -1) {
       cellIndexLookup[cellIndex] = cellIndices.length
@@ -496,6 +503,7 @@ export const createTextData = (): TextData => {
     colors[offset + 2] = b
     mask[cellIndex] = 0
     revealRatios[cellIndex] = ratio
+    fadeRatios[cellIndex] = ratio
   }
 
   assertInvariant(cellIndices.length > 0, 'text sampling produced empty mask')
@@ -663,5 +671,6 @@ export const createTextData = (): TextData => {
     revealRatios,
     cellIndices: Int32Array.from(cellIndices),
     cellIndexLookup,
+    fadeRatios,
   }
 }
