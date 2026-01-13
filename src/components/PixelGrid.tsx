@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, type PointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import {
   BACKGROUND_COLOR,
   DECAY_FACTOR,
@@ -41,6 +41,7 @@ import {
 } from './pixelGridCore'
 
 import type { ExplosionParticle, PixelGridOrientation, ScatterParticle } from './pixelGridCore'
+import { createWebglRenderer, type WebglFrame, type WebglRenderer } from './webglRenderer'
 
 const computeFlicker = (cellIndex: number, timeMs: number) => {
   if (FLICKER_INTENSITY <= 0 || FLICKER_UPDATE_INTERVAL_MS <= 0) {
@@ -62,19 +63,39 @@ interface PixelGridProps {
 }
 
 const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }: PixelGridProps) => {
+  const [fps, setFps] = useState<number | null>(null)
+  const [timings, setTimings] = useState<{
+    webglMs: number | null
+    readbackMs: number | null
+    drawMs: number | null
+    scatterParticles: number | null
+    highlights: number | null
+  }>({
+    webglMs: null,
+    readbackMs: null,
+    drawMs: null,
+    scatterParticles: null,
+    highlights: null,
+  })
   const textData = useMemo(() => createTextData(orientation), [orientation])
   const flickerEnabled = FLICKER_INTENSITY > 0 && FLICKER_UPDATE_INTERVAL_MS > 0
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const renderModeRef = useRef<'text' | 'webgl'>('text')
+  const modeTimerRef = useRef<number | null>(null)
 
   const animationFrameRef = useRef<number | null>(null)
   const flickerTimerRef = useRef<number | null>(null)
+
   const dprRef = useRef<number>(window.devicePixelRatio || 1)
   const metricsRef = useRef<{ offsetX: number; offsetY: number; cellSize: number }>({
     offsetX: 0,
     offsetY: 0,
     cellSize: 1,
   })
+
+  const webglRendererRef = useRef<WebglRenderer | null>(null)
+  const webglFrameRef = useRef<WebglFrame | null>(null)
 
   const intensitiesRef = useRef<Float32Array>(new Float32Array(GRID_SIZE * GRID_SIZE))
   const textScatterFlagsRef = useRef<Uint8Array>(new Uint8Array(textData.cellIndices.length))
@@ -118,6 +139,36 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
   const textPauseTimerRef = useRef<number | null>(null)
   const startNextCycleRef = useRef<() => void>(() => {})
   const particleSpawnInitRef = useRef(false)
+  const fpsSampleRef = useRef<{ last: number; count: number; smoothed: number }>({
+    last: 0,
+    count: 0,
+    smoothed: 0,
+  })
+  const timingAccumulatorRef = useRef<{
+    drawSum: number
+    drawCount: number
+    webglSum: number
+    webglCount: number
+    readSum: number
+    readCount: number
+    lastUpdate: number
+  }>({
+    drawSum: 0,
+    drawCount: 0,
+    webglSum: 0,
+    webglCount: 0,
+    readSum: 0,
+    readCount: 0,
+    lastUpdate: 0,
+  })
+
+  const frameTimeTrackerRef = useRef<{
+    lastLogTime: number
+    frameTimeBuffer: number[]
+  }>({
+    lastLogTime: 0,
+    frameTimeBuffer: [],
+  })
 
   if (!particleSpawnInitRef.current) {
     lastParticleSpawnRef.current.fill(-Infinity)
@@ -130,6 +181,11 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
   useEffect(() => {
     curlAmountRef.current = typeof curlAmount === 'number' ? curlAmount : SCATTER_PARTICLE_CURL_DEFAULT
   }, [curlAmount])
+
+  const now =
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? () => performance.now()
+      : () => Date.now()
 
   const clearScatterTimers = useCallback(() => {
     scatterTimersRef.current.forEach((timer) => window.clearTimeout(timer))
@@ -218,6 +274,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
 
     const { width, height } = canvas
     const { offsetX, offsetY, cellSize } = metricsRef.current
+    const glFrame = renderModeRef.current === 'webgl' ? webglFrameRef.current : null
     const intensities = intensitiesRef.current
     const { mask, colors, revealRatios, fadeRatios } = textData
     const revealProgress = textRevealProgressRef.current
@@ -230,10 +287,35 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
 
+    if (glFrame && glFrame.data.length >= glFrame.size * glFrame.size * 4) {
+      const sampleSize = Math.min(glFrame.size, GRID_SIZE)
+      const drawSize = cellSize
+      const stride = glFrame.size * 4
+      const step = glFrame.size / sampleSize
+      const data = glFrame.data
+      for (let y = 0; y < sampleSize; y += 1) {
+        const srcY = glFrame.size - 1 - Math.min(glFrame.size - 1, Math.floor(y * step))
+        const rowOffset = srcY * stride
+        for (let x = 0; x < sampleSize; x += 1) {
+          const srcX = Math.min(glFrame.size - 1, Math.floor(x * step))
+          const idx = rowOffset + srcX * 4
+          const a = data[idx + 3] / 255
+          if (a <= 0) continue
+          const r = data[idx]
+          const g = data[idx + 1]
+          const b = data[idx + 2]
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${a})`
+          ctx.fillRect(offsetX + x * drawSize, offsetY + y * drawSize, drawSize, drawSize)
+        }
+      }
+      return
+    }
+
     const drawExplosion =
       globalExplosionActiveRef.current && globalExplosionParticlesRef.current.length > 0
 
     if (drawExplosion) {
+
       const explosionCellSize = metricsRef.current.cellSize
       const drawSize = Math.max(explosionCellSize * 0.9, 1)
       const sizeOffset = (explosionCellSize - drawSize) / 2
@@ -588,32 +670,88 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
       animationFrameRef.current = null
       noiseTimeRef.current += deltaMs
 
-      if (textRevealProgressRef.current < 1) {
+      const fpsSample = fpsSampleRef.current
+      fpsSample.count += 1
+      if (fpsSample.last === 0) {
+        fpsSample.last = timestamp
+      } else {
+        const elapsed = timestamp - fpsSample.last
+        if (elapsed >= 500) {
+          const currentFps = (fpsSample.count / Math.max(elapsed, 1)) * 1000
+          const smoothed = fpsSample.smoothed > 0 ? fpsSample.smoothed * 0.6 + currentFps * 0.4 : currentFps
+          fpsSample.smoothed = smoothed
+          fpsSample.count = 0
+          fpsSample.last = timestamp
+          requestIdleCallback(() => setFps(Math.round(smoothed)))
+        }
+      }
+
+      if (textRevealProgressRef.current < 1 && renderModeRef.current === 'text') {
         textRevealProgressRef.current = Math.min(
           1,
           textRevealProgressRef.current + deltaMs / TEXT_REVEAL_DURATION_MS,
         )
       }
 
-      const explosionHasEnergy = updateGlobalExplosion(frameDelta)
-      const intensityHasEnergy = decayIntensities({
+      const isWebglMode = renderModeRef.current === 'webgl'
+
+      const explosionHasEnergy = isWebglMode ? false : updateGlobalExplosion(frameDelta)
+      const intensityHasEnergy = isWebglMode ? false : decayIntensities({
         suppressIntroGlow: explosionHasEnergy,
         delta: frameDelta,
       })
 
-      const pendingScatter = pendingTextScatterRef.current
-      if (pendingScatter.length > 0) {
-        const batchSize = 96
-        const take = Math.min(batchSize, pendingScatter.length)
-        for (let index = 0; index < take; index += 1) {
-          scatterCellRef.current(pendingScatter[index])
+      if (!isWebglMode) {
+        const pendingScatter = pendingTextScatterRef.current
+        if (pendingScatter.length > 0) {
+          const batchSize = 96
+          const take = Math.min(batchSize, pendingScatter.length)
+          for (let index = 0; index < take; index += 1) {
+            scatterCellRef.current(pendingScatter[index])
+          }
+          pendingScatter.splice(0, take)
         }
-        pendingScatter.splice(0, take)
       }
 
-      const particlesHaveEnergy = updateScatterParticles(frameDelta)
+      const webglRenderer = webglRendererRef.current
+      if (webglRenderer && isWebglMode) {
+        const webglStart = now()
+        const frameOutput = webglRenderer.render(timestamp)
+        const webglEnd = now()
+        if (webglEnd - webglStart > 16) {
+          console.log(`[Perf] WebGL render slow: ${(webglEnd - webglStart).toFixed(1)}ms | metrics:`, frameOutput?.metrics)
+        }
+        if (frameOutput) {
+          webglFrameRef.current = frameOutput
+          const metrics = frameOutput.metrics
+          if (metrics) {
+            const timing = timingAccumulatorRef.current
+            timing.webglSum += metrics.drawMs
+            timing.webglCount += 1
+            timing.readSum += metrics.readPixelsMs
+            timing.readCount += 1
+          }
+        }
+      }
 
-      if (textFadeOutActiveRef.current) {
+      const particlesHaveEnergy = isWebglMode ? false : updateScatterParticles(frameDelta)
+
+      const frameTimeTracker = frameTimeTrackerRef.current
+      if (deltaMs > 20 && !isWebglMode) {
+        const perfNow = performance.now()
+        frameTimeTracker.frameTimeBuffer.push(deltaMs)
+        if (perfNow - frameTimeTracker.lastLogTime > 2000) {
+          if (frameTimeTracker.frameTimeBuffer.length > 0) {
+            const avg = frameTimeTracker.frameTimeBuffer.reduce((a, b) => a + b, 0) / frameTimeTracker.frameTimeBuffer.length
+            const max = Math.max(...frameTimeTracker.frameTimeBuffer)
+            console.log(`[Perf] Slow frames (${frameTimeTracker.frameTimeBuffer.length} in last 2s): avg ${avg.toFixed(1)}ms, max ${max.toFixed(1)}ms | particles: ${scatterParticlesRef.current.length}, highlights: ${highlightActiveRef.current.length}, webgl: ${renderModeRef.current}`)
+          }
+          frameTimeTracker.frameTimeBuffer = []
+          frameTimeTracker.lastLogTime = perfNow
+        }
+      }
+
+      if (textFadeOutActiveRef.current && !isWebglMode) {
         const fadeIncrement = TEXT_FADE_OUT_DURATION_MS > 0 ? deltaMs / TEXT_FADE_OUT_DURATION_MS : 1
         const nextFade = Math.min(1, textFadeOutProgressRef.current + fadeIncrement)
         textFadeOutProgressRef.current = nextFade
@@ -628,14 +766,50 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
               textPauseTimerRef.current = null
               textPauseActiveRef.current = false
               pendingForcedScatterRef.current = false
-              startNextCycleRef.current()
+              renderModeRef.current = 'webgl'
+              if (modeTimerRef.current !== null) {
+                window.clearTimeout(modeTimerRef.current)
+              }
+              modeTimerRef.current = window.setTimeout(() => {
+                modeTimerRef.current = null
+                renderModeRef.current = 'text'
+                startNextCycleRef.current()
+              }, 10000)
+              scheduleFrame()
             }, TEXT_LOOP_PAUSE_MS)
           }
         }
       }
 
 
+      const drawStart = now()
       draw()
+      const drawDuration = now() - drawStart
+      const timing = timingAccumulatorRef.current
+      timing.drawSum += drawDuration
+      timing.drawCount += 1
+
+      if (timing.lastUpdate === 0) {
+        timing.lastUpdate = timestamp
+      } else if (timestamp - timing.lastUpdate >= 600) {
+        const nextDraw = timing.drawCount > 0 ? timing.drawSum / timing.drawCount : null
+        const nextWebgl = timing.webglCount > 0 ? timing.webglSum / timing.webglCount : null
+        const nextRead = timing.readCount > 0 ? timing.readSum / timing.readCount : null
+        requestIdleCallback(() => setTimings({
+          drawMs: nextDraw,
+          webglMs: nextWebgl,
+          readbackMs: nextRead,
+          scatterParticles: scatterParticlesRef.current.length,
+          highlights: highlightActiveRef.current.length,
+        }))
+        timing.drawSum = 0
+        timing.drawCount = 0
+        timing.webglSum = 0
+        timing.webglCount = 0
+        timing.readSum = 0
+        timing.readCount = 0
+        timing.lastUpdate = timestamp
+      }
 
       const needsReveal = textRevealProgressRef.current < 1
       const hasEnergy = explosionHasEnergy || intensityHasEnergy || particlesHaveEnergy
@@ -646,7 +820,8 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
         globalExplosionActiveRef.current ||
         needsReveal ||
         framePendingRef.current ||
-        textFadeOutActiveRef.current
+        textFadeOutActiveRef.current ||
+        isWebglMode
 
       frameRunningRef.current = false
 
@@ -900,9 +1075,40 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     scatterCellRef.current = scatterCell
   }, [scatterCell])
 
+  useEffect(() => {
+    const renderer = createWebglRenderer(GRID_SIZE)
+    webglRendererRef.current = renderer
+    return () => {
+      renderer?.dispose()
+      webglRendererRef.current = null
+      webglFrameRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const clearModeTimer = () => {
+      if (modeTimerRef.current !== null) {
+        window.clearTimeout(modeTimerRef.current)
+        modeTimerRef.current = null
+      }
+    }
+
+    const setMode = (mode: 'text' | 'webgl') => {
+      console.log(`[Mode] Switching to ${mode} at ${performance.now().toFixed(0)}ms`)
+      renderModeRef.current = mode
+      scheduleFrame()
+    }
+
+    setMode('text')
+
+    return () => {
+      clearModeTimer()
+    }
+  }, [])
+
   const handlePointerActivation = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
-      if (globalExplosionActiveRef.current) {
+      if (globalExplosionActiveRef.current || renderModeRef.current === 'webgl') {
         return
       }
 
@@ -919,7 +1125,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
 
   const triggerExplosion = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {
-      if (globalExplosionActiveRef.current) {
+      if (globalExplosionActiveRef.current || renderModeRef.current === 'webgl') {
         return
       }
 
@@ -1098,6 +1304,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
       window.removeEventListener('resize', resize)
       if (animationFrameRef.current !== null) {
         window.cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
       }
       clearScatterTimers()
       clearExplosionTimers()
@@ -1119,7 +1326,6 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
         window.clearTimeout(flickerTimerRef.current)
         flickerTimerRef.current = null
       }
-      scheduleFrame(true)
     }
   }, [
     clearExplosionTimers,
@@ -1144,13 +1350,25 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
   )
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="h-full w-full touch-none"
-      onPointerMove={handlePointerActivation}
-      onPointerEnter={handlePointerActivation}
-      onPointerDown={handlePointerDown}
-    />
+    <div className="relative h-full w-full">
+      <canvas
+        ref={canvasRef}
+        className="h-full w-full touch-none"
+        onPointerMove={handlePointerActivation}
+        onPointerEnter={handlePointerActivation}
+        onPointerDown={handlePointerDown}
+      />
+      <div className="pointer-events-none absolute left-4 bottom-4 rounded border border-white/10 bg-black/35 px-2 py-1 text-[11px] font-mono uppercase tracking-[0.12em] text-white/75 backdrop-blur-sm">
+        <div>{fps === null ? 'FPS …' : `FPS ${fps}`}</div>
+        <div className="mt-0.5 flex gap-2 text-[10px] font-mono uppercase tracking-[0.08em] text-white/60">
+          <span>draw {timings.drawMs === null ? '—' : `${timings.drawMs.toFixed(1)}ms`}</span>
+          <span>webgl {timings.webglMs === null ? '—' : `${timings.webglMs.toFixed(1)}ms`}</span>
+          <span>read {timings.readbackMs === null ? '—' : `${timings.readbackMs.toFixed(1)}ms`}</span>
+          <span>part {timings.scatterParticles === null ? '—' : timings.scatterParticles}</span>
+          <span>hi {timings.highlights === null ? '—' : timings.highlights}</span>
+        </div>
+      </div>
+    </div>
   )
 }
 
