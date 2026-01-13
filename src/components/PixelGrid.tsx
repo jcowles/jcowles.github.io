@@ -86,6 +86,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
 
   const animationFrameRef = useRef<number | null>(null)
   const flickerTimerRef = useRef<number | null>(null)
+  const scheduleFrameRef = useRef<(force?: boolean) => void>(() => {})
 
   const dprRef = useRef<number>(window.devicePixelRatio || 1)
   const metricsRef = useRef<{ offsetX: number; offsetY: number; cellSize: number }>({
@@ -182,10 +183,29 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     curlAmountRef.current = typeof curlAmount === 'number' ? curlAmount : SCATTER_PARTICLE_CURL_DEFAULT
   }, [curlAmount])
 
-  const now =
-    typeof performance !== 'undefined' && typeof performance.now === 'function'
-      ? () => performance.now()
-      : () => Date.now()
+  const now = useMemo(
+    () =>
+      typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? () => performance.now()
+        : () => Date.now(),
+    [],
+  )
+
+  const queueIdleCallback = useMemo<((callback: IdleRequestCallback) => number)>(
+    () => {
+      if (typeof window === 'undefined') {
+        return () => 0
+      }
+
+      if (typeof window.requestIdleCallback === 'function') {
+        return (callback: IdleRequestCallback) => window.requestIdleCallback(callback)
+      }
+
+      return (callback: IdleRequestCallback) =>
+        window.setTimeout(() => callback({ didTimeout: false, timeRemaining: () => 16 }), 0)
+    },
+    [],
+  )
 
   const clearScatterTimers = useCallback(() => {
     scatterTimersRef.current.forEach((timer) => window.clearTimeout(timer))
@@ -682,7 +702,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
           fpsSample.smoothed = smoothed
           fpsSample.count = 0
           fpsSample.last = timestamp
-          requestIdleCallback(() => setFps(Math.round(smoothed)))
+          queueIdleCallback(() => setFps(Math.round(smoothed)))
         }
       }
 
@@ -775,7 +795,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
                 renderModeRef.current = 'text'
                 startNextCycleRef.current()
               }, 10000)
-              scheduleFrame()
+              scheduleFrameRef.current?.()
             }, TEXT_LOOP_PAUSE_MS)
           }
         }
@@ -795,7 +815,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
         const nextDraw = timing.drawCount > 0 ? timing.drawSum / timing.drawCount : null
         const nextWebgl = timing.webglCount > 0 ? timing.webglSum / timing.webglCount : null
         const nextRead = timing.readCount > 0 ? timing.readSum / timing.readCount : null
-        requestIdleCallback(() => setTimings({
+        queueIdleCallback(() => setTimings({
           drawMs: nextDraw,
           webglMs: nextWebgl,
           readbackMs: nextRead,
@@ -845,7 +865,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
         }
       }
     },
-    [decayIntensities, draw, flickerEnabled, updateGlobalExplosion, updateScatterParticles],
+    [decayIntensities, draw, flickerEnabled, now, updateGlobalExplosion, updateScatterParticles],
   )
 
   const scheduleFrame = useCallback(
@@ -873,6 +893,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     },
     [frame],
   )
+  scheduleFrameRef.current = scheduleFrame
 
   const spawnScatterParticle = useCallback(
     (cellIndex: number, baseIntensity = 1) => {
@@ -903,9 +924,9 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
 
       scatterParticlesRef.current.push(particle)
       depositIntensity(cellIndex, intensity)
-      scheduleFrame()
+      scheduleFrameRef.current?.()
     },
-    [depositIntensity, scheduleFrame],
+    [depositIntensity, scheduleFrameRef],
   )
 
   const trySpawnParticleForHighlight = useCallback(
@@ -975,9 +996,9 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
         trySpawnParticleForHighlight(index, clamped)
       }
 
-      scheduleFrame()
+      scheduleFrameRef.current?.()
     },
-    [intensitiesRef, intensityAgeRef, scheduleFrame, trySpawnParticleForHighlight],
+    [intensitiesRef, intensityAgeRef, scheduleFrameRef, trySpawnParticleForHighlight],
   )
 
   const applyRipple = useCallback(
@@ -1096,7 +1117,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     const setMode = (mode: 'text' | 'webgl') => {
       console.log(`[Mode] Switching to ${mode} at ${performance.now().toFixed(0)}ms`)
       renderModeRef.current = mode
-      scheduleFrame()
+      scheduleFrameRef.current?.()
     }
 
     setMode('text')
@@ -1207,7 +1228,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
       clearExplosionTimers()
       clearRippleTimers()
 
-      scheduleFrame(true)
+      scheduleFrameRef.current?.(true)
     },
     [
       clearExplosionTimers,
@@ -1215,7 +1236,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
       clearRippleTimers,
       clearScatterCompletionGuard,
       clearScatterTimers,
-      scheduleFrame,
+      scheduleFrameRef,
       textData,
     ],
   )
@@ -1228,9 +1249,9 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     if (!textFadeOutActiveRef.current && !textPauseActiveRef.current) {
       clearFadeOutState()
       textFadeOutActiveRef.current = true
-      scheduleFrame()
+      scheduleFrameRef.current?.()
     }
-  }, [clearFadeOutState, scheduleFrame])
+  }, [clearFadeOutState, scheduleFrameRef])
   completeScatterRef.current = completeScatter
 
   useEffect(() => {
@@ -1290,7 +1311,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
   useEffect(() => {
     resize()
     window.addEventListener('resize', resize)
-    scheduleFrame()
+    scheduleFrameRef.current?.()
 
     const pendingTextScatter = pendingTextScatterRef.current
     const textRevealTriggered = textRevealTriggeredRef.current
@@ -1334,7 +1355,7 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     clearScatterCompletionGuard,
     clearScatterTimers,
     resize,
-    scheduleFrame,
+    scheduleFrameRef,
   ])
 
   const handlePointerDown = useCallback(
