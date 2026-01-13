@@ -146,15 +146,6 @@ export const createSynth = (context: AudioContext): SynthVoice => {
         addOsc('triangle', -5)
         addOsc('sine', 5)
         break
-      case 'kick':
-        addOsc('sine')
-        break
-      case 'snare':
-        addOsc('triangle', 5)
-        break
-      case 'hihat':
-        addOsc('triangle', 12)
-        break
     }
 
     gain.gain.setValueAtTime(0, startTime)
