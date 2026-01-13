@@ -307,6 +307,10 @@ const PixelGrid = ({ scatterSignal = 0, curlAmount, orientation = 'landscape' }:
     ctx.fillStyle = BACKGROUND_COLOR
     ctx.fillRect(0, 0, width, height)
 
+    if (renderModeRef.current === 'webgl' && !glFrame) {
+      return
+    }
+
     if (glFrame && glFrame.data.length >= glFrame.size * glFrame.size * 4) {
       const sampleSize = Math.min(glFrame.size, GRID_SIZE)
       const drawSize = cellSize
